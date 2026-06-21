@@ -12,4 +12,7 @@ urlpatterns = [
     # ── Status ────────────────────────────────────────────────────────────────
     path('status/', StatusCheckView.as_view(), name='status'),
 
+    # ── Database ──────────────────────────────────────────────────────────────
+    path('db/', DbCheckView.as_view(), name='db_check'),
+
 ]
