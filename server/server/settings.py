@@ -16,6 +16,8 @@ DEBUG = os.getenv('DEBUG', 'True') == 'True'
 
 ALLOWED_HOSTS = ['*']
 
+NGROK_DOMAIN = 'twisting-stove-chief.ngrok-free.dev'
+
 
 # Application definition
 

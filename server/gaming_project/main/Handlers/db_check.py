@@ -2,12 +2,13 @@
 # Verifies MongoDB connectivity and read/write capability.
 
 from datetime import datetime, timezone
-from .db_connection import db_main
+from .db_connection import get_db
 
 
 def db_check():
     """Insert a test document, read it back, delete it, and return the result."""
 
+    db_main = get_db()
     if db_main is None:
         return {
             "status": "error",
@@ -31,6 +32,16 @@ def db_check():
 
         # 3. Cleanup
         test_collection.delete_one({"_id": insert_result.inserted_id})
+
+        if fetched is None:
+            return {
+                "status": "error",
+                "db_connected": True,
+                "write": "success",
+                "read": "failed",
+                "message": "Document was inserted but could not be read back.",
+                "inserted_id": inserted_id,
+            }
 
         return {
             "status": "ok",

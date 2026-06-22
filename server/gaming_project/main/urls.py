@@ -15,4 +15,7 @@ urlpatterns = [
     # ── Database ──────────────────────────────────────────────────────────────
     path('db/', DbCheckView.as_view(), name='db_check'),
 
+    # ── Cafes ─────────────────────────────────────────────────────────────────
+    path('cafes/', CafeListCreateView.as_view(), name='cafes'),
+
 ]

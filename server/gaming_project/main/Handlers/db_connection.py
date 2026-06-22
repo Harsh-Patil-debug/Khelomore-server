@@ -4,26 +4,28 @@
 
 import os
 import pymongo
+from pathlib import Path
 from dotenv import load_dotenv
-from pymongo.errors import ConnectionFailure, ConfigurationError
 
-load_dotenv()
+# Ensure .env is loaded using absolute path
+BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+load_dotenv(BASE_DIR / '.env')
 
 MONGO_URL = os.getenv("MONGO_URL")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "KheloMoreDB")
 
-try:
-    client = pymongo.MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
-    db_main = client[MONGO_DB_NAME]
-    print(f"[KheloMore] MongoDB connected - database: '{MONGO_DB_NAME}'")
-except (ConnectionFailure, ConfigurationError, Exception) as e:
-    print(f"[KheloMore] Failed to connect to MongoDB: {e}")
-    client = None
-    db_main = None
+_client = None
 
-# ─── Collections ──────────────────────────────────────────────────────────────
-# db_main.users          → { _id, email, password_hash, first_name, last_name, phone_number, profile_picture, status, created_at }
-# db_main.cafes          → { _id, name, location, address, amenities, price_per_hour, images, available_slots, is_active }
-# db_main.bookings       → { _id, user_id, cafe_id, date, slots[], total_price, status, created_at }
-# db_main.notifications  → { _id, title, body, user_ids[], is_broadcast, created_at }
-# db_main.push_tokens    → { _id, user_id, token, platform, created_at }
+def get_db():
+    global _client
+    if _client is None:
+        try:
+            _client = pymongo.MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+            # Ping database to force connection check
+            _client.admin.command('ping')
+            print(f"[KheloMore] MongoDB connected successfully - database: '{MONGO_DB_NAME}'")
+        except Exception as e:
+            print(f"[KheloMore] Failed to connect to MongoDB: {e}")
+            _client = None
+            return None
+    return _client[MONGO_DB_NAME]
