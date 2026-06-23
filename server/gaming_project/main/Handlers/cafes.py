@@ -45,7 +45,7 @@ SEED_CAFES = [
         "specs": ["RTX 4090", "360Hz", "VIP Lounge", "Sim Rigs"],
         "price_per_hour": 200,
         "images": [
-            "https://images.unsplash.com/photo-1598550476439-6847785fce6e?q=80&w=600",
+            "https://res.cloudinary.com/dx1ulvuqy/image/upload/v1782199128/gear_up_img1.jpg",
             "https://res.cloudinary.com/dx1ulvuqy/image/upload/v1782075377/q5rjmhxf04mtye2ogler.jpg"
         ]
     },
@@ -90,7 +90,7 @@ SEED_CAFES = [
         "specs": ["RTX 4090", "240Hz", "VIP Lounge"],
         "price_per_hour": 180,
         "images": [
-            "https://images.unsplash.com/photo-1507457379470-08b8006b224e?q=80&w=600",
+            "https://res.cloudinary.com/dx1ulvuqy/image/upload/v1782199129/neon_arena_img1.jpg",
             "https://res.cloudinary.com/dx1ulvuqy/image/upload/v1782075382/zi8usuenoomgytyzr8xi.jpg"
         ]
     },
@@ -120,8 +120,8 @@ SEED_CAFES = [
         "specs": ["RTX 4090", "360Hz", "Sim Rigs", "Console Lounge"],
         "price_per_hour": 220,
         "images": [
-            "https://images.unsplash.com/photo-1612287230202-1bf1d85d1bdf?q=80&w=600",
-            "https://images.unsplash.com/photo-1580234810907-b40315b76418?q=80&w=600"
+            "https://res.cloudinary.com/dx1ulvuqy/image/upload/v1782199130/rogue_circuit_img1.jpg",
+            "https://res.cloudinary.com/dx1ulvuqy/image/upload/v1782199131/rogue_circuit_img2.jpg"
         ]
     },
     {
@@ -136,7 +136,7 @@ SEED_CAFES = [
         "price_per_hour": 160,
         "images": [
             "https://res.cloudinary.com/dx1ulvuqy/image/upload/v1782075387/qr9qrswu2rs2hzlg26bw.jpg",
-            "https://images.unsplash.com/photo-1548685913-fe6574340a49?q=80&w=600"
+            "https://res.cloudinary.com/dx1ulvuqy/image/upload/v1782199132/ghost_protocol_img2.jpg"
         ]
     }
 ]
