@@ -9,11 +9,33 @@ import cloudinary
 import cloudinary.uploader
 from .db_connection import get_db
 
+# Default standard operating slots (10:00 AM - 10:00 PM, 1-hour intervals)
+DEFAULT_SLOTS = [
+    "10:00 AM - 11:00 AM",
+    "11:00 AM - 12:00 PM",
+    "12:00 PM - 01:00 PM",
+    "01:00 PM - 02:00 PM",
+    "02:00 PM - 03:00 PM",
+    "03:00 PM - 04:00 PM",
+    "04:00 PM - 05:00 PM",
+    "05:00 PM - 06:00 PM",
+    "06:00 PM - 07:00 PM",
+    "07:00 PM - 08:00 PM",
+    "08:00 PM - 09:00 PM",
+    "09:00 PM - 10:00 PM",
+]
+
+
 # Configure Cloudinary
+cloudinary_secret = os.getenv("CLOUDINARY_API_SECRET")
+if not cloudinary_secret or cloudinary_secret == "your_api_secret_placeholder":
+    print("[KheloMore Warning] CLOUDINARY_API_SECRET environment variable is not set. Image uploads to Cloudinary will fail and fallback to default images.")
+    cloudinary_secret = "your_api_secret_placeholder"
+
 cloudinary.config(
     cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME", "dghp9tq9m"),
     api_key=os.getenv("CLOUDINARY_API_KEY", "631388716584283"),
-    api_secret=os.getenv("CLOUDINARY_API_SECRET", "your_api_secret_placeholder"),
+    api_secret=cloudinary_secret,
     secure=True
 )
 
@@ -183,7 +205,8 @@ def map_cafe_doc(doc, user_lat=None, user_lon=None):
         "area": doc.get("area", ""),
         "specs": doc.get("specs", []),
         "pricePerHour": int(doc.get("price_per_hour", 0)),
-        "images": doc.get("images", [])
+        "images": doc.get("images", []),
+        "slots": doc.get("slots", DEFAULT_SLOTS)
     }
 
 
@@ -353,3 +376,60 @@ def create_cafe_handler(data, files=None):
             "status": "error",
             "message": f"Failed to create cafe: {e}"
         }
+
+
+def get_cafe_detail_handler(cafe_id):
+    """Retrieves a single gaming cafe by ID."""
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        from bson import ObjectId
+        doc = db_main.cafes.find_one({"_id": ObjectId(cafe_id)})
+        if not doc:
+            return {"status": "error", "message": "Cafe not found."}
+        return {"status": "success", "cafe": map_cafe_doc(doc)}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to retrieve cafe detail: {e}"}
+
+
+def update_cafe_handler(cafe_id, data):
+    """Updates a gaming cafe's properties, including custom operating hours/slots."""
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        from bson import ObjectId
+        update_fields = {}
+        if "name" in data:
+            update_fields["name"] = data["name"]
+        if "area" in data:
+            update_fields["area"] = data["area"]
+        if "pricePerHour" in data:
+            update_fields["price_per_hour"] = int(data["pricePerHour"])
+        if "distanceKm" in data:
+            update_fields["distance_km"] = float(data["distanceKm"])
+        if "latitude" in data:
+            update_fields["latitude"] = float(data["latitude"])
+        if "longitude" in data:
+            update_fields["longitude"] = float(data["longitude"])
+        if "specs" in data:
+            update_fields["specs"] = data["specs"]
+        if "images" in data:
+            update_fields["images"] = data["images"]
+        if "slots" in data:
+            # slots should be a list of strings
+            update_fields["slots"] = data["slots"]
+
+        if not update_fields:
+            return {"status": "error", "message": "No valid fields to update."}
+
+        res = db_main.cafes.update_one({"_id": ObjectId(cafe_id)}, {"$set": update_fields})
+        if res.matched_count == 0:
+            return {"status": "error", "message": "Cafe not found."}
+
+        updated_doc = db_main.cafes.find_one({"_id": ObjectId(cafe_id)})
+        return {"status": "success", "cafe": map_cafe_doc(updated_doc)}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to update cafe: {e}"}
+

@@ -12,8 +12,8 @@ from django.http import HttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from .Handlers import status_check, db_check, cafes
-from .Handlers import auth_handler
+from django.conf import settings
+from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, auth_handler, bookings_handler
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
@@ -284,6 +284,127 @@ class BookingListCreateView(APIView):
             price      = data.get("price", 0)
         )
         return Response(result, status=status_code)
+
+# ── Tournaments ────────────────────────────────────────────────────────────────
+
+class TournamentListCreateView(APIView):
+    """GET /tournaments/ — List/seed tournaments, POST /tournaments/ — Create a new tournament with image upload"""
+    parser_classes = (MultiPartParser, FormParser)
+
+    def get(self, request):
+        response = tournaments.get_tournaments_handler()
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+    def post(self, request):
+        response = tournaments.create_tournament_handler(request.data, request.FILES)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_201_CREATED)
+
+
+class TournamentToggleRegistrationView(APIView):
+    """POST /tournaments/<tournament_id>/toggle-registration/ — Toggle registration open/closed (Admin action)"""
+    def post(self, request, tournament_id):
+        response = tournaments.toggle_registration_handler(tournament_id)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class TournamentRegisterView(APIView):
+    """POST /tournaments/<str:tournament_id>/register/ — Register for a tournament"""
+    def post(self, request, tournament_id):
+        response = tournaments.register_tournament_handler(tournament_id, request.data)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+
+
+
+# ── Hardware Rigs ─────────────────────────────────────────────────────────────
+
+class RigListCreateView(APIView):
+    """GET /rigs/ — List/seed rigs, POST /rigs/ — Create a new rig"""
+    def get(self, request):
+        cafe_id = request.query_params.get("cafe_id") or request.query_params.get("cafeId")
+        response = rigs.get_rigs_handler(cafe_id=cafe_id)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(response, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        response = rigs.create_rig_handler(request.data)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_201_CREATED)
+
+
+class RigDetailView(APIView):
+    """GET /rigs/<id>/ — Detail, PUT /rigs/<id>/ — Update, DELETE /rigs/<id>/ — Delete"""
+    def get(self, request, rig_id):
+        response = rigs.get_rig_detail_handler(rig_id)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_404_NOT_FOUND)
+        return Response(response, status=status.HTTP_200_OK)
+
+    def put(self, request, rig_id):
+        response = rigs.update_rig_handler(rig_id, request.data)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+    def delete(self, request, rig_id):
+        response = rigs.delete_rig_handler(rig_id)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class CafeDetailView(APIView):
+    """GET /cafes/<id>/ — Detail, PUT /cafes/<id>/ — Update, DELETE /cafes/<id>/ — Delete (not used)"""
+    def get(self, request, cafe_id):
+        response = cafes.get_cafe_detail_handler(cafe_id)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_404_NOT_FOUND)
+        return Response(response, status=status.HTTP_200_OK)
+
+    def put(self, request, cafe_id):
+        response = cafes.update_cafe_handler(cafe_id, request.data)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class BookingDetailView(APIView):
+    """PUT /bookings/<id>/ — Update, DELETE /bookings/<id>/ — Cancel/Free slot"""
+    def put(self, request, booking_id):
+        response = bookings.update_booking_handler(booking_id, request.data)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+    def delete(self, request, booking_id):
+        response = bookings.delete_booking_handler(booking_id)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class RazorpayOrderCreateView(APIView):
+    """POST /payments/create-order/ — Create a Razorpay Order"""
+    def post(self, request):
+        amount = request.data.get("amount")
+        if amount is None:
+            return Response({"status": "error", "message": "Missing 'amount' parameter"}, status=status.HTTP_400_BAD_REQUEST)
+        response = payments.create_razorpay_order_handler(amount)
+        response["key_id"] = getattr(settings, 'RAZORPAY_KEY_ID', '')
+        return Response(response, status=status.HTTP_200_OK)
+
 
 
 
