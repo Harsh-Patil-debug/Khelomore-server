@@ -29,3 +29,21 @@ def get_db():
             _client = None
             return None
     return _client[MONGO_DB_NAME]
+
+
+class _DbProxy:
+    """
+    Lazy MongoDB proxy.
+    auth_handler.py does: `from .db_connection import db_main`
+    Each attribute access (e.g. db_main.users) calls get_db() so the
+    connection is never attempted at import time.
+    """
+    def __getattr__(self, name: str):
+        db = get_db()
+        if db is None:
+            raise ConnectionError("[KheloMore] MongoDB not available")
+        return getattr(db, name)
+
+
+# Singleton proxy — safe to import at module level
+db_main = _DbProxy()
