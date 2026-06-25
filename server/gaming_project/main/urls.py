@@ -17,5 +17,23 @@ urlpatterns = [
 
     # ── Cafes ─────────────────────────────────────────────────────────────────
     path('cafes/', CafeListCreateView.as_view(), name='cafes'),
+    path('cafes/<str:cafe_id>/', CafeDetailView.as_view(), name='cafe_detail'),
+
+    # ── Tournaments ───────────────────────────────────────────────────────────
+    path('tournaments/', TournamentListCreateView.as_view(), name='tournaments'),
+    path('tournaments/<str:tournament_id>/toggle-registration/', TournamentToggleRegistrationView.as_view(), name='toggle_registration'),
+    path('tournaments/<str:tournament_id>/register/', TournamentRegisterView.as_view(), name='register_tournament'),
+
+    # ── Bookings ──────────────────────────────────────────────────────────────
+    path('bookings/', BookingListCreateView.as_view(), name='bookings'),
+    path('bookings/<str:booking_id>/', BookingDetailView.as_view(), name='booking_detail'),
+
+    # ── Hardware Rigs ─────────────────────────────────────────────────────────
+    path('rigs/', RigListCreateView.as_view(), name='rigs'),
+    path('rigs/<str:rig_id>/', RigDetailView.as_view(), name='rig_detail'),
+
+    # ── Payments ──────────────────────────────────────────────────────────────
+    path('payments/create-order/', RazorpayOrderCreateView.as_view(), name='create_razorpay_order'),
 
 ]
+
