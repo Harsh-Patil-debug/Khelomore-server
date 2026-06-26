@@ -129,3 +129,7 @@ GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
 # Razorpay Keys
 RAZORPAY_KEY_ID = os.getenv('RAZORPAY_KEY_ID', '')
 RAZORPAY_KEY_SECRET = os.getenv('RAZORPAY_KEY_SECRET', '')
+
+# Admin Security
+ADMIN_TOKEN = os.getenv('ADMIN_TOKEN', 'km_admin_sec_3ea5c89fbf0e8ad9c922da1713d2f9b1740b2e8a15cfbceefea38b5fdf5e27a6')
+

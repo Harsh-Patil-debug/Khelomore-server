@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.conf import settings
-from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, auth_handler, bookings_handler
+from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, auth_handler, bookings_handler, auth_middleware
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
@@ -51,6 +51,9 @@ class CafeListCreateView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
     def post(self, request):
+        success, error_response = auth_middleware.authenticate_admin_request(request)
+        if error_response:
+            return error_response
         response = cafes.create_cafe_handler(request.data, request.FILES)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
@@ -179,6 +182,7 @@ class KheloMoreGoogleLoginView(APIView):
                 "&response_type=code"
                 "&scope=openid%20email%20profile"
                 "&access_type=offline"
+                "&prompt=select_account"
                 f"&state={return_url}"
             )
             return redirect(auth_url)
@@ -251,27 +255,17 @@ class BookingListCreateView(APIView):
     POST /bookings/create/ — Reserve slots. Requires JWT.
     """
     def get(self, request):
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return Response({"error": "Authorization header missing or invalid"}, status=status.HTTP_401_UNAUTHORIZED)
-        token = auth_header.split(' ')[1]
-        try:
-            email = auth_handler.verify_token(token)
-        except Exception as e:
-            return Response({"error": f"Invalid token: {str(e)}"}, status=status.HTTP_401_UNAUTHORIZED)
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
             
         result, status_code = bookings_handler.get_user_bookings_handler(email)
         return Response(result, status=status_code)
 
     def post(self, request):
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return Response({"error": "Authorization header missing or invalid"}, status=status.HTTP_401_UNAUTHORIZED)
-        token = auth_header.split(' ')[1]
-        try:
-            email = auth_handler.verify_token(token)
-        except Exception as e:
-            return Response({"error": f"Invalid token: {str(e)}"}, status=status.HTTP_401_UNAUTHORIZED)
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
             
         data = request.data
         result, status_code = bookings_handler.create_booking_handler(
@@ -299,6 +293,9 @@ class TournamentListCreateView(APIView):
 
 
     def post(self, request):
+        success, error_response = auth_middleware.authenticate_admin_request(request)
+        if error_response:
+            return error_response
         response = tournaments.create_tournament_handler(request.data, request.FILES)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
@@ -308,6 +305,9 @@ class TournamentListCreateView(APIView):
 class TournamentToggleRegistrationView(APIView):
     """POST /tournaments/<tournament_id>/toggle-registration/ — Toggle registration open/closed (Admin action)"""
     def post(self, request, tournament_id):
+        success, error_response = auth_middleware.authenticate_admin_request(request)
+        if error_response:
+            return error_response
         response = tournaments.toggle_registration_handler(tournament_id)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
@@ -317,6 +317,9 @@ class TournamentToggleRegistrationView(APIView):
 class TournamentRegisterView(APIView):
     """POST /tournaments/<str:tournament_id>/register/ — Register for a tournament"""
     def post(self, request, tournament_id):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
         response = tournaments.register_tournament_handler(tournament_id, request.data)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
@@ -338,6 +341,9 @@ class RigListCreateView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
     def post(self, request):
+        success, error_response = auth_middleware.authenticate_admin_request(request)
+        if error_response:
+            return error_response
         response = rigs.create_rig_handler(request.data)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
@@ -353,12 +359,18 @@ class RigDetailView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
     def put(self, request, rig_id):
+        success, error_response = auth_middleware.authenticate_admin_request(request)
+        if error_response:
+            return error_response
         response = rigs.update_rig_handler(rig_id, request.data)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)
 
     def delete(self, request, rig_id):
+        success, error_response = auth_middleware.authenticate_admin_request(request)
+        if error_response:
+            return error_response
         response = rigs.delete_rig_handler(rig_id)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
@@ -374,6 +386,9 @@ class CafeDetailView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
     def put(self, request, cafe_id):
+        success, error_response = auth_middleware.authenticate_admin_request(request)
+        if error_response:
+            return error_response
         response = cafes.update_cafe_handler(cafe_id, request.data)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
@@ -383,12 +398,20 @@ class CafeDetailView(APIView):
 class BookingDetailView(APIView):
     """PUT /bookings/<id>/ — Update, DELETE /bookings/<id>/ — Cancel/Free slot"""
     def put(self, request, booking_id):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+
         response = bookings.update_booking_handler(booking_id, request.data)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)
 
     def delete(self, request, booking_id):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+
         response = bookings.delete_booking_handler(booking_id)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
@@ -398,12 +421,17 @@ class BookingDetailView(APIView):
 class RazorpayOrderCreateView(APIView):
     """POST /payments/create-order/ — Create a Razorpay Order"""
     def post(self, request):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+
         amount = request.data.get("amount")
         if amount is None:
             return Response({"status": "error", "message": "Missing 'amount' parameter"}, status=status.HTTP_400_BAD_REQUEST)
         response = payments.create_razorpay_order_handler(amount)
         response["key_id"] = getattr(settings, 'RAZORPAY_KEY_ID', '')
         return Response(response, status=status.HTTP_200_OK)
+
 
 
 
