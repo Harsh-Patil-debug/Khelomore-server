@@ -62,6 +62,18 @@ class CafeListCreateView(APIView):
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
+def check_is_admin(request):
+    auth_header = request.headers.get('Authorization') or request.META.get('HTTP_AUTHORIZATION')
+    expected_token = getattr(settings, 'ADMIN_TOKEN', '')
+    print(f"[DEBUG check_is_admin] Received Header: {auth_header}")
+    print(f"[DEBUG check_is_admin] Expected Token: {expected_token}")
+    if auth_header and auth_header.startswith('Bearer '):
+        token = auth_header.split(' ')[1].strip()
+        is_match = (token == expected_token)
+        print(f"[DEBUG check_is_admin] Extracted Token: {token} | Match: {is_match}")
+        return is_match
+    return False
+
 class KheloMoreRegisterView(APIView):
     """
     POST /auth/register/
@@ -75,6 +87,7 @@ class KheloMoreRegisterView(APIView):
             email    = data.get("email", ""),
             password = data.get("password", ""),
             iv       = data.get("iv", ""),
+            is_admin = check_is_admin(request),
         )
         return Response(result, status=status_code)
 
@@ -91,6 +104,7 @@ class KheloMoreLoginView(APIView):
             email    = data.get("email", ""),
             password = data.get("password", ""),
             iv       = data.get("iv", ""),
+            is_admin = check_is_admin(request),
         )
         return Response(result, status=status_code)
 
@@ -107,6 +121,7 @@ class KheloMoreVerifyOTPView(APIView):
             email    = data.get("email", ""),
             otp_code = data.get("otp_code", ""),
             iv       = data.get("iv", ""),
+            is_admin = check_is_admin(request),
         )
         return Response(result, status=status_code)
 
@@ -123,6 +138,7 @@ class KheloMoreGoogleAuthView(APIView):
             gmail    = data.get("gmail", ""),
             gamertag = data.get("gamertag", ""),
             iv       = data.get("iv", ""),
+            is_admin = check_is_admin(request),
         )
         return Response(result, status=status_code)
 
@@ -147,13 +163,15 @@ class KheloMoreResendOTPView(APIView):
         import random
         from datetime import datetime, timedelta
 
-        user = db_main.users.find_one({"email": dec_email})
+        is_admin = check_is_admin(request)
+        coll = db_main.admins if is_admin else db_main.users
+        user = coll.find_one({"email": dec_email})
         if not user:
             return Response({"error": "No account found for this email."}, status=404)
 
         otp_code   = str(random.randint(100000, 999999))
         otp_expiry = datetime.now(auth_handler.IST) + timedelta(minutes=10)
-        db_main.users.update_one(
+        coll.update_one(
             {"_id": user["_id"]},
             {"$set": {"otp_code": otp_code, "otp_expiry": otp_expiry}}
         )
