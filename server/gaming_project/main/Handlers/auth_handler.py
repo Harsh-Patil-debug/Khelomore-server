@@ -135,7 +135,10 @@ def generate_qr_code(uri: str) -> str:
 # KheloMore Custom Auth Functions (email OTP mandatory for traditional auth)
 # ===============================================================================
 
-def khelomore_register(gamertag, email, password, iv):
+def get_user_collection(is_admin=False):
+    return db_main.admins if is_admin else db_main.users
+
+def khelomore_register(gamertag, email, password, iv, is_admin=False):
     """Signup Step 1 - creates pending user, sends OTP, NO JWT yet."""
     try:
         dec_gamertag = decrypt_data(gamertag, iv).strip()
@@ -144,14 +147,15 @@ def khelomore_register(gamertag, email, password, iv):
     except Exception as e:
         return {"error": f"Decryption failed: {str(e)}"}, 400
 
-    if db_main.users.find_one({"email": dec_email}):
+    coll = get_user_collection(is_admin)
+    if coll.find_one({"email": dec_email}):
         return {"error": "An account with this email already exists."}, 400
 
     password_hash = ph.hash(dec_password)
     otp_code      = str(random.randint(100000, 999999))
     otp_expiry    = datetime.now(IST) + timedelta(minutes=10)
 
-    db_main.users.insert_one({
+    coll.insert_one({
         "gamertag":      dec_gamertag.upper().replace(" ", "_"),
         "email":         dec_email,
         "password_hash": password_hash,
@@ -161,6 +165,7 @@ def khelomore_register(gamertag, email, password, iv):
         "xp":            0,
         "rank":          "Recruit PRO I",
         "createdAt":     datetime.now(IST),
+        "role":          "admin" if is_admin else "user",
     })
 
     from .email_handler import send_otp_email
@@ -171,7 +176,7 @@ def khelomore_register(gamertag, email, password, iv):
     return {"encrypted_response": enc_resp, "iv": iv2}, 200
 
 
-def khelomore_login(email, password, iv):
+def khelomore_login(email, password, iv, is_admin=False):
     """Login Step 1 - verifies credentials, sends OTP, NO JWT yet."""
     try:
         dec_email    = decrypt_data(email, iv).strip().lower()
@@ -179,7 +184,8 @@ def khelomore_login(email, password, iv):
     except Exception as e:
         return {"error": f"Decryption failed: {str(e)}"}, 400
 
-    user = db_main.users.find_one({"email": dec_email})
+    coll = get_user_collection(is_admin)
+    user = coll.find_one({"email": dec_email})
     if not user:
         return {"error": "Invalid email or password."}, 401
     if user.get("status") == "Blocked":
@@ -191,7 +197,7 @@ def khelomore_login(email, password, iv):
 
     otp_code   = str(random.randint(100000, 999999))
     otp_expiry = datetime.now(IST) + timedelta(minutes=10)
-    db_main.users.update_one(
+    coll.update_one(
         {"_id": user["_id"]},
         {"$set": {"otp_code": otp_code, "otp_expiry": otp_expiry}}
     )
@@ -205,7 +211,7 @@ def khelomore_login(email, password, iv):
     return {"encrypted_response": enc_resp, "iv": iv2}, 200
 
 
-def khelomore_verify_otp(email, otp_code, iv):
+def khelomore_verify_otp(email, otp_code, iv, is_admin=False):
     """Step 2 (login + signup) - validates OTP, activates account, issues JWT."""
     try:
         dec_email = decrypt_data(email, iv).strip().lower()
@@ -213,7 +219,8 @@ def khelomore_verify_otp(email, otp_code, iv):
     except Exception as e:
         return {"error": f"Decryption failed: {str(e)}"}, 400
 
-    user = db_main.users.find_one({"email": dec_email})
+    coll = get_user_collection(is_admin)
+    user = coll.find_one({"email": dec_email})
     if not user:
         return {"error": "Session not found. Please start again."}, 404
 
@@ -230,7 +237,7 @@ def khelomore_verify_otp(email, otp_code, iv):
         return {"error": "Invalid verification code."}, 400
 
     is_new = user.get("status") == "Pending"
-    db_main.users.update_one(
+    coll.update_one(
         {"_id": user["_id"]},
         {"$set": {"status": "Active"}, "$unset": {"otp_code": "", "otp_expiry": ""}}
     )
@@ -255,6 +262,7 @@ def khelomore_verify_otp(email, otp_code, iv):
             "xp":             user.get("xp", 0),
             "auth_provider":  user.get("auth_provider", "traditional"),
             "total_playtime": user.get("total_playtime", 140),
+            "role":           user.get("role", "admin" if is_admin else "user"),
         }
     }
 
@@ -267,7 +275,7 @@ def khelomore_verify_otp(email, otp_code, iv):
     return {"encrypted_response": enc_resp, "iv": iv2}, 200
 
 
-def khelomore_google_auth(gmail, gamertag, iv):
+def khelomore_google_auth(gmail, gamertag, iv, is_admin=False):
     """Google Sign-In: find or create user, return JWT DIRECTLY (no OTP needed)."""
     try:
         dec_email    = decrypt_data(gmail, iv).strip().lower()
@@ -275,13 +283,14 @@ def khelomore_google_auth(gmail, gamertag, iv):
     except Exception as e:
         return {"error": f"Decryption failed: {str(e)}"}, 400
 
-    user = db_main.users.find_one({"email": dec_email})
+    coll = get_user_collection(is_admin)
+    user = coll.find_one({"email": dec_email})
     if user and user.get("status") == "Blocked":
         return {"error": "This account has been blocked."}, 403
 
     is_new = not user
     if is_new:
-        result = db_main.users.insert_one({
+        result = coll.insert_one({
             "gamertag":      dec_gamertag.upper().replace(" ", "_"),
             "email":         dec_email,
             "auth_provider": "google",
@@ -289,8 +298,9 @@ def khelomore_google_auth(gmail, gamertag, iv):
             "xp":            150,
             "rank":          "Recruit PRO I",
             "createdAt":     datetime.now(IST),
+            "role":          "admin" if is_admin else "user",
         })
-        user = db_main.users.find_one({"_id": result.inserted_id})
+        user = coll.find_one({"_id": result.inserted_id})
         try:
             from .email_handler import send_welcome_email
             send_welcome_email(dec_email, dec_gamertag)
@@ -310,6 +320,7 @@ def khelomore_google_auth(gmail, gamertag, iv):
             "xp":             user.get("xp", 0),
             "auth_provider":  user.get("auth_provider", "google"),
             "total_playtime": user.get("total_playtime", 140),
+            "role":           user.get("role", "admin" if is_admin else "user"),
         }
     }
 
@@ -322,7 +333,7 @@ def khelomore_google_auth(gmail, gamertag, iv):
     return {"encrypted_response": enc_resp, "iv": iv2}, 200
 
 
-def khelomore_google_auth_code_verify(code: str):
+def khelomore_google_auth_code_verify(code: str, is_admin=False):
     """
     Exchanges Google Auth Code for ID Token, verifies it, and returns a Khelomore session.
     """
@@ -363,14 +374,15 @@ def khelomore_google_auth_code_verify(code: str):
         derived_gamertag = first_name.upper().replace(" ", "_")
 
         # 3. Check MongoDB: Get or Create User
-        user = db_main.users.find_one({"email": email})
+        coll = get_user_collection(is_admin)
+        user = coll.find_one({"email": email})
 
         if user and user.get("status") == "Blocked":
             return {"error": "This account has been blocked."}, 403
 
         is_new = not user
         if is_new:
-            result = db_main.users.insert_one({
+            result = coll.insert_one({
                 "gamertag":      derived_gamertag,
                 "email":         email,
                 "auth_provider": "google",
@@ -378,8 +390,9 @@ def khelomore_google_auth_code_verify(code: str):
                 "xp":            150,
                 "rank":          "Recruit PRO I",
                 "createdAt":     datetime.now(IST),
+                "role":          "admin" if is_admin else "user",
             })
-            user = db_main.users.find_one({"_id": result.inserted_id})
+            user = coll.find_one({"_id": result.inserted_id})
             try:
                 send_welcome_email(email, derived_gamertag)
             except Exception as e:
@@ -398,6 +411,7 @@ def khelomore_google_auth_code_verify(code: str):
                 "xp":             user.get("xp", 0),
                 "auth_provider":  user.get("auth_provider", "google"),
                 "total_playtime": user.get("total_playtime", 140),
+                "role":           user.get("role", "admin" if is_admin else "user"),
             }
         }
 
