@@ -192,7 +192,8 @@ def get_user_bookings_handler(user_email: str):
                 "price": b.get("price"),
                 "code": b.get("code"),
                 "status": status,
-                "rig": b.get("rig")
+                "rig": b.get("rig"),
+                "userEmail": b.get("user_email")
             }
             if status == "Active":
                 item["remainingTimeSeconds"] = remaining_time
