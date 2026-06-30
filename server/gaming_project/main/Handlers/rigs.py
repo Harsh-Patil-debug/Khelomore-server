@@ -13,8 +13,8 @@ SEED_RIG_TEMPLATES = [
     {"type": "PC", "name": "PC #05", "spec": "RTX 4080 · 240Hz"},
     {"type": "PC", "name": "PC #06", "spec": "RTX 4080 · 240Hz"},
     {"type": "PC", "name": "PC #07", "spec": "RTX 4070 · 240Hz"},
-    {"type": "PS5", "name": "PS5 Pro #01", "spec": "DualSense Edge · 4K"},
-    {"type": "PS5", "name": "PS5 Pro #02", "spec": "DualSense Edge · 4K"},
+    {"type": "PS5", "name": "PS5 #01", "spec": "DualSense Edge · 4K"},
+    {"type": "PS5", "name": "PS5 #02", "spec": "DualSense Edge · 4K"},
 ]
 
 def map_rig_doc(doc):
@@ -24,7 +24,10 @@ def map_rig_doc(doc):
         "cafeId": doc.get("cafe_id"),
         "type": doc.get("type", "PC"),
         "name": doc.get("name", ""),
-        "spec": doc.get("spec", "")
+        "spec": doc.get("spec", ""),
+        "status": doc.get("status", "available"),
+        "zone": doc.get("zone", "Standard"),
+        "hourly_price": doc.get("hourly_price", 100),
     }
 
 def get_rigs_handler(cafe_id=None):

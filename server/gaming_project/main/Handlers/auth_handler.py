@@ -148,6 +148,11 @@ def khelomore_register(gamertag, email, password, iv, is_admin=False):
         return {"error": f"Decryption failed: {str(e)}"}, 400
 
     coll = get_user_collection(is_admin)
+    if is_admin:
+        cafe_exists = db_main.cafes.find_one({"owner_email": dec_email})
+        if not cafe_exists:
+            return {"error": "This email is not authorized. Please contact the platform Super Admin to list your cafe first."}, 403
+
     if coll.find_one({"email": dec_email}):
         return {"error": "An account with this email already exists."}, 400
 
@@ -188,6 +193,12 @@ def khelomore_login(email, password, iv, is_admin=False):
     user = coll.find_one({"email": dec_email})
     if not user:
         return {"error": "Invalid email or password."}, 401
+
+    if is_admin:
+        cafe_exists = db_main.cafes.find_one({"owner_email": dec_email})
+        if not cafe_exists:
+            return {"error": "This account is not associated with any registered gaming cafe. Access denied."}, 403
+
     if user.get("status") == "Blocked":
         return {"error": "This account has been blocked."}, 403
     if not user.get("password_hash"):
@@ -284,6 +295,11 @@ def khelomore_google_auth(gmail, gamertag, iv, is_admin=False):
         return {"error": f"Decryption failed: {str(e)}"}, 400
 
     coll = get_user_collection(is_admin)
+    if is_admin:
+        cafe_exists = db_main.cafes.find_one({"owner_email": dec_email})
+        if not cafe_exists:
+            return {"error": "This email is not authorized. Please contact the platform Super Admin to list your cafe first."}, 403
+
     user = coll.find_one({"email": dec_email})
     if user and user.get("status") == "Blocked":
         return {"error": "This account has been blocked."}, 403
@@ -375,6 +391,11 @@ def khelomore_google_auth_code_verify(code: str, is_admin=False):
 
         # 3. Check MongoDB: Get or Create User
         coll = get_user_collection(is_admin)
+        if is_admin:
+            cafe_exists = db_main.cafes.find_one({"owner_email": email})
+            if not cafe_exists:
+                return {"error": "This email is not authorized. Please contact the platform Super Admin to list your cafe first."}, 403
+
         user = coll.find_one({"email": email})
 
         if user and user.get("status") == "Blocked":

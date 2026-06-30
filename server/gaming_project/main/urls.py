@@ -17,10 +17,12 @@ urlpatterns = [
 
     # ── Cafes ─────────────────────────────────────────────────────────────────
     path('cafes/', CafeListCreateView.as_view(), name='cafes'),
+    path('cafes/my/', CafeMyListView.as_view(), name='my_cafes'),
     path('cafes/<str:cafe_id>/', CafeDetailView.as_view(), name='cafe_detail'),
 
     # ── Tournaments ───────────────────────────────────────────────────────────
     path('tournaments/', TournamentListCreateView.as_view(), name='tournaments'),
+    path('tournaments/registrations/', UserTournamentRegistrationsView.as_view(), name='user_tournament_registrations'),
     path('tournaments/<str:tournament_id>/toggle-registration/', TournamentToggleRegistrationView.as_view(), name='toggle_registration'),
     path('tournaments/<str:tournament_id>/register/', TournamentRegisterView.as_view(), name='register_tournament'),
 
@@ -34,6 +36,9 @@ urlpatterns = [
 
     # ── Payments ──────────────────────────────────────────────────────────────
     path('payments/create-order/', RazorpayOrderCreateView.as_view(), name='create_razorpay_order'),
+
+    # ── User Favorites ────────────────────────────────────────────────────────
+    path('users/favorites/', UserFavoritesView.as_view(), name='user_favorites'),
 
     # ── Auth (traditional — OTP mandatory) ────────────────────────────────────
     path('auth/register/',   KheloMoreRegisterView.as_view(),  name='auth_register'),
@@ -49,5 +54,8 @@ urlpatterns = [
     # ── Bookings ──────────────────────────────────────────────────────────────
     path('bookings/slots/',  BookedSlotsView.as_view(),        name='bookings_slots'),
 
+    # ── Sessions ──────────────────────────────────────────────────────────────
+    path('sessions/', SessionListCreateView.as_view(), name='sessions'),
+    path('sessions/<str:session_id>/<str:action>/', SessionActionView.as_view(), name='session_action'),
 ]
 

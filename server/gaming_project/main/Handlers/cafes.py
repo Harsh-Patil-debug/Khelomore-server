@@ -23,6 +23,8 @@ DEFAULT_SLOTS = [
     "07:00 PM - 08:00 PM",
     "08:00 PM - 09:00 PM",
     "09:00 PM - 10:00 PM",
+    "10:00 PM - 11:00 PM",
+    "11:00 PM - 12:00 AM",
 ]
 
 
@@ -206,7 +208,11 @@ def map_cafe_doc(doc, user_lat=None, user_lon=None):
         "specs": doc.get("specs", []),
         "pricePerHour": int(doc.get("price_per_hour", 0)),
         "images": doc.get("images", []),
-        "slots": doc.get("slots", DEFAULT_SLOTS)
+        "slots": doc.get("slots", DEFAULT_SLOTS),
+        "owner_email": doc.get("owner_email", ""),
+        "address": doc.get("address", ""),
+        "city": doc.get("city", ""),
+        "phone": doc.get("phone", "")
     }
 
 
@@ -220,10 +226,11 @@ def get_cafes_handler(latitude=None, longitude=None):
         }
 
     try:
-        # Check if the cafes collection is empty
-        if db_main.cafes.count_documents({}) == 0:
-            db_main.cafes.insert_many(SEED_CAFES)
-            print("[KheloMore] Database seeded with default gaming cafes.")
+        # Auto-seeding disabled to prevent mock cafes from populating
+        # if db_main.cafes.count_documents({}) == 0:
+        #     db_main.cafes.insert_many(SEED_CAFES)
+        #     print("[KheloMore] Database seeded with default gaming cafes.")
+        pass
 
         # Parse request coordinates if present
         user_lat = None
@@ -361,7 +368,11 @@ def create_cafe_handler(data, files=None):
             "rating": 5.0,
             "reviews": 1,
             "specs": specs,
-            "images": final_images
+            "images": final_images,
+            "owner_email": data.get("owner_email") or data.get("ownerEmail") or data.get("contact_email") or data.get("contactEmail") or "",
+            "address": data.get("address") or "",
+            "city": data.get("city") or "",
+            "phone": data.get("phone") or ""
         }
 
         result = db_main.cafes.insert_one(cafe_doc)
@@ -407,6 +418,8 @@ def update_cafe_handler(cafe_id, data):
             update_fields["area"] = data["area"]
         if "pricePerHour" in data:
             update_fields["price_per_hour"] = int(data["pricePerHour"])
+        if "price_per_hour" in data:
+            update_fields["price_per_hour"] = int(data["price_per_hour"])
         if "distanceKm" in data:
             update_fields["distance_km"] = float(data["distanceKm"])
         if "latitude" in data:
@@ -418,8 +431,33 @@ def update_cafe_handler(cafe_id, data):
         if "images" in data:
             update_fields["images"] = data["images"]
         if "slots" in data:
-            # slots should be a list of strings
             update_fields["slots"] = data["slots"]
+        if "address" in data:
+            update_fields["address"] = data["address"]
+        if "city" in data:
+            update_fields["city"] = data["city"]
+        if "phone" in data:
+            update_fields["phone"] = data["phone"]
+        if "contact_email" in data:
+            update_fields["contact_email"] = data["contact_email"]
+        if "contactEmail" in data:
+            update_fields["contact_email"] = data["contactEmail"]
+        if "banner_url" in data:
+            update_fields["banner_url"] = data["banner_url"]
+        if "bannerUrl" in data:
+            update_fields["banner_url"] = data["bannerUrl"]
+        if "logo_url" in data:
+            update_fields["logo_url"] = data["logo_url"]
+        if "logoUrl" in data:
+            update_fields["logo_url"] = data["logoUrl"]
+        if "operating_hours" in data:
+            update_fields["operating_hours"] = data["operating_hours"]
+        if "operatingHours" in data:
+            update_fields["operating_hours"] = data["operatingHours"]
+        if "amenities" in data:
+            update_fields["amenities"] = data["amenities"]
+        if "social" in data:
+            update_fields["social"] = data["social"]
 
         if not update_fields:
             return {"status": "error", "message": "No valid fields to update."}
@@ -432,4 +470,28 @@ def update_cafe_handler(cafe_id, data):
         return {"status": "success", "cafe": map_cafe_doc(updated_doc)}
     except Exception as e:
         return {"status": "error", "message": f"Failed to update cafe: {e}"}
+
+
+def get_my_cafes_handler(owner_email, is_super_admin=False):
+    """Retrieves all cafes (for super admins) or only cafes matching owner_email."""
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+
+    try:
+        query = {}
+        if not is_super_admin:
+            query["owner_email"] = owner_email.strip().lower()
+
+        docs = list(db_main.cafes.find(query))
+        mapped_cafes = [map_cafe_doc(d) for d in docs]
+        return {
+            "status": "success",
+            "cafes": mapped_cafes
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to retrieve my cafes: {e}"
+        }
 

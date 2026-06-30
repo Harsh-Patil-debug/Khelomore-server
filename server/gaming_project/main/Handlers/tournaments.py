@@ -141,11 +141,12 @@ def map_tournament_doc(doc):
         "startsIso": starts_iso,
         "isLive": is_live,
         "registrationOpen": effective_registration_open,
-        "images": doc.get("images", [])
+        "images": doc.get("images", []),
+        "cafe_id": doc.get("cafe_id")
     }
 
 
-def get_tournaments_handler():
+def get_tournaments_handler(cafe_id=None):
     """Retrieves all esports tournaments from the database. Seeds if empty."""
     db_main = get_db()
     if db_main is None:
@@ -220,7 +221,11 @@ def get_tournaments_handler():
             {"$set": {"registration_open": True}}
         )
 
-        docs = list(db_main.tournaments.find({}))
+        query = {}
+        if cafe_id:
+            query["cafe_id"] = cafe_id
+
+        docs = list(db_main.tournaments.find(query))
         mapped = [map_tournament_doc(d) for d in docs]
 
         return {"status": "success", "tournaments": mapped}
@@ -335,7 +340,8 @@ def create_tournament_handler(data, files=None):
             "starts": starts,
             "starts_iso": starts_iso,
             "registration_open": True,
-            "images": final_images
+            "images": final_images,
+            "cafe_id": data.get("cafe_id") or data.get("cafeId")
         }
 
         result = db_main.tournaments.insert_one(tournament_doc)
@@ -346,7 +352,7 @@ def create_tournament_handler(data, files=None):
         return {"status": "error", "message": f"Failed to create tournament: {e}"}
 
 
-def register_tournament_handler(tournament_id, data):
+def register_tournament_handler(tournament_id, user_email, data):
     """Registers a squad/gamer for a tournament, increments slot/registered count, and closes registration if capacity is reached."""
     db_main = get_db()
     if db_main is None:
@@ -380,6 +386,8 @@ def register_tournament_handler(tournament_id, data):
         # Store registration info in database
         registration_doc = {
             "tournament_id": oid,
+            "tournament_title": tournament.get("title", "Unknown Tournament"),
+            "user_email": user_email.strip().lower() if user_email else None,
             "gamer_ids": gamer_ids,
             "registered_at": datetime.now(timezone.utc)
         }
@@ -403,4 +411,33 @@ def register_tournament_handler(tournament_id, data):
         print(f"[KheloMore] Failed to register for tournament: {e}")
         print(traceback.format_exc())
         return {"status": "error", "message": f"Failed to register: {e}"}
+
+
+def get_user_registrations_handler(user_email: str):
+    """
+    Fetches the tournament IDs that the user has registered for from MongoDB.
+    """
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+        
+    try:
+        user_email = user_email.strip().lower()
+        # Find all registrations under this email
+        regs = db_main.registrations.find({"user_email": user_email})
+        tournament_ids = []
+        for r in regs:
+            t_id = r.get("tournament_id")
+            if t_id:
+                tournament_ids.append(str(t_id))
+                
+        return {
+            "status": "success",
+            "registrations": list(set(tournament_ids))
+        }, 200
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to retrieve registrations: {str(e)}"
+        }, 500
 

@@ -12,8 +12,7 @@ from django.http import HttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.conf import settings
-from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, auth_handler, bookings_handler, auth_middleware
+from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, auth_handler, bookings_handler, auth_middleware, favorites, sessions
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
@@ -60,6 +59,22 @@ class CafeListCreateView(APIView):
         return Response(response, status=status.HTTP_201_CREATED)
 
 
+class CafeMyListView(APIView):
+    """GET /cafes/my/ — List cafes owned by the authenticated admin."""
+    def get(self, request):
+        print("[DEBUG CafeMyListView] Received GET /cafes/my/")
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            print("[DEBUG CafeMyListView] Auth failed:", error_response.data)
+            return error_response
+ 
+        response = cafes.get_my_cafes_handler(email, is_super_admin=False)
+        print(f"[DEBUG CafeMyListView] get_my_cafes_handler response: {response}")
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(response, status=status.HTTP_200_OK)
+
+
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
 def check_is_admin(request):
@@ -68,10 +83,12 @@ def check_is_admin(request):
     print(f"[DEBUG check_is_admin] Received Header: {auth_header}")
     print(f"[DEBUG check_is_admin] Expected Token: {expected_token}")
     if auth_header and auth_header.startswith('Bearer '):
-        token = auth_header.split(' ')[1].strip()
-        is_match = (token == expected_token)
-        print(f"[DEBUG check_is_admin] Extracted Token: {token} | Match: {is_match}")
-        return is_match
+        parts = auth_header.split(' ')
+        if len(parts) >= 2:
+            token = parts[1].strip()
+            is_match = (token == expected_token)
+            print(f"[DEBUG check_is_admin] Extracted Token: {token} | Match: {is_match}")
+            return is_match
     return False
 
 class KheloMoreRegisterView(APIView):
@@ -165,6 +182,12 @@ class KheloMoreResendOTPView(APIView):
 
         is_admin = check_is_admin(request)
         coll = db_main.admins if is_admin else db_main.users
+
+        if is_admin:
+            cafe_exists = db_main.cafes.find_one({"owner_email": dec_email})
+            if not cafe_exists:
+                return Response({"error": "This account is not associated with any registered gaming cafe. Access denied."}, status=403)
+
         user = coll.find_one({"email": dec_email})
         if not user:
             return Response({"error": "No account found for this email."}, status=404)
@@ -277,7 +300,8 @@ class BookingListCreateView(APIView):
         if error_response:
             return error_response
             
-        result, status_code = bookings_handler.get_user_bookings_handler(email)
+        cafe_id = request.query_params.get("cafe_id") or request.query_params.get("cafeId")
+        result, status_code = bookings_handler.get_user_bookings_handler(email, cafe_id=cafe_id)
         return Response(result, status=status_code)
 
     def post(self, request):
@@ -286,14 +310,27 @@ class BookingListCreateView(APIView):
             return error_response
             
         data = request.data
+        print("[DEBUG POST /bookings/] Incoming data:", data)
+        
+        # Explicit slots parsing to prevent operator precedence bugs
+        slots = data.get("slots")
+        if not slots:
+            slot_str = data.get("slot")
+            if slot_str:
+                slots = [s.strip() for s in slot_str.split(",") if s.strip()]
+            else:
+                slots = []
+
         result, status_code = bookings_handler.create_booking_handler(
             user_email = email,
-            cafe_id    = data.get("cafe_id"),
-            cafe_name  = data.get("cafe_name"),
+            cafe_id    = data.get("cafe_id") or data.get("cafeId"),
+            cafe_name  = data.get("cafe_name") or data.get("cafeName"),
             zone       = data.get("zone"),
             date       = data.get("date"),
-            slots      = data.get("slots", []),
-            price      = data.get("price", 0)
+            slots      = slots,
+            price      = data.get("price", 0),
+            rig        = data.get("rig"),
+            user_name  = data.get("userName") or data.get("user_name")
         )
         return Response(result, status=status_code)
 
@@ -304,7 +341,8 @@ class TournamentListCreateView(APIView):
     parser_classes = (MultiPartParser, FormParser)
 
     def get(self, request):
-        response = tournaments.get_tournaments_handler()
+        cafe_id = request.query_params.get("cafe_id") or request.query_params.get("cafeId")
+        response = tournaments.get_tournaments_handler(cafe_id=cafe_id)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(response, status=status.HTTP_200_OK)
@@ -338,10 +376,23 @@ class TournamentRegisterView(APIView):
         email, error_response = auth_middleware.authenticate_request(request)
         if error_response:
             return error_response
-        response = tournaments.register_tournament_handler(tournament_id, request.data)
+        response = tournaments.register_tournament_handler(tournament_id, email, request.data)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)
+
+
+class UserTournamentRegistrationsView(APIView):
+    """
+    GET /tournaments/registrations/ — Fetch the logged-in user's tournament registrations. Requires JWT.
+    """
+    def get(self, request):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+            
+        result, status_code = tournaments.get_user_registrations_handler(email)
+        return Response(result, status=status_code)
 
 
 
@@ -449,6 +500,141 @@ class RazorpayOrderCreateView(APIView):
         response = payments.create_razorpay_order_handler(amount)
         response["key_id"] = getattr(settings, 'RAZORPAY_KEY_ID', '')
         return Response(response, status=status.HTTP_200_OK)
+
+
+class UserFavoritesView(APIView):
+    """
+    GET /users/favorites/ — Retrieve user's favorite cafes. Requires JWT.
+    POST /users/favorites/ — Toggle a favorite cafe. Requires JWT.
+    """
+    def get(self, request):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+            
+        result, status_code = favorites.get_favorites_handler(email)
+        return Response(result, status=status_code)
+
+    def post(self, request):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+            
+        cafe_id = request.data.get("cafe_id")
+        result, status_code = favorites.toggle_favorite_handler(email, cafe_id)
+        return Response(result, status=status_code)
+
+
+def authenticate_admin_owner(request, cafe_id):
+    """
+    Validates that the request is authenticated by:
+    1. A JWT token belonging to the owner of the specified cafe, OR
+    2. The static ADMIN_TOKEN (superadmin).
+    Returns (email, None) if successful.
+    Returns (None, Response) if unauthorized or forbidden.
+    """
+    from .Handlers.db_connection import get_db
+    from bson import ObjectId
+    
+    db = get_db()
+    if not db:
+        return None, Response({"status": "error", "message": "Database offline"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Try standard JWT authorization
+    email, error_response = auth_middleware.authenticate_request(request)
+    if not error_response and email:
+        # Check ownership
+        try:
+            cafe = db.cafes.find_one({"_id": ObjectId(cafe_id)})
+            if cafe and cafe.get("owner_email") == email:
+                return email, None
+        except Exception:
+            pass
+        
+    # Try static superadmin authorization
+    success, admin_error = auth_middleware.authenticate_admin_request(request)
+    if success:
+        return "superadmin@khelomore.com", None
+        
+    return None, Response({"status": "error", "message": "Unauthorized: You do not own this cafe"}, status=status.HTTP_403_FORBIDDEN)
+
+
+class SessionListCreateView(APIView):
+    """
+    GET /sessions/?cafe_id=... — Retrieves active/reserved sessions for the cafe.
+    POST /sessions/ — Starts a manual walk-in session.
+    """
+    def get(self, request):
+        cafe_id = request.query_params.get("cafe_id")
+        if not cafe_id:
+            return Response({"status": "error", "message": "Missing 'cafe_id' parameter"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+
+        response = sessions.list_sessions_handler(cafe_id)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(response, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        system_id = request.data.get("system_id") or request.data.get("systemId")
+        if not system_id:
+            return Response({"status": "error", "message": "Missing 'system_id' parameter"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        from .Handlers.db_connection import get_db
+        from bson import ObjectId
+        db = get_db()
+        rig = db.rigs.find_one({"_id": ObjectId(system_id)})
+        if not rig:
+            return Response({"status": "error", "message": "Rig not found"}, status=status.HTTP_404_NOT_FOUND)
+        
+        cafe_id = rig.get("cafe_id")
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+
+        response = sessions.start_session_handler(data=request.data)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_201_CREATED)
+
+
+class SessionActionView(APIView):
+    """
+    Handles active session control:
+    POST /sessions/<id>/start/ — Start booking session.
+    POST /sessions/<id>/extend/ — Extend session.
+    POST /sessions/<id>/end/ — Stop session early.
+    """
+    def post(self, request, session_id, action):
+        from .Handlers.db_connection import get_db
+        from bson import ObjectId
+        db = get_db()
+        booking = db.bookings.find_one({"_id": ObjectId(session_id)})
+        if not booking:
+            return Response({"status": "error", "message": "Booking not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        cafe_id = booking.get("cafe_id")
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+
+        if action == "start":
+            response = sessions.start_session_handler(booking_id=session_id)
+        elif action == "extend":
+            minutes = request.data.get("minutes", 30)
+            response = sessions.extend_session_handler(booking_id=session_id, minutes=minutes)
+        elif action == "end":
+            response = sessions.end_session_handler(booking_id=session_id)
+        else:
+            return Response({"status": "error", "message": "Invalid action"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
 
 
 

@@ -34,6 +34,18 @@ INSTALLED_APPS = [
     'corsheaders',
 ]
 
+# REST Framework Configuration (Global Rate Limiting to prevent DDoS/abuse)
+REST_FRAMEWORK = {
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '60/minute',   # Maximum 60 requests per minute for unauthenticated IPs
+        'user': '300/minute',  # Maximum 300 requests per minute for logged-in users
+    }
+}
+
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
