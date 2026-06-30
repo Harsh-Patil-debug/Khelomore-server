@@ -446,6 +446,18 @@ class RigDetailView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
 
+class RigReserveView(APIView):
+    """POST /rigs/<id>/reserve/ — Create an admin reservation for specific slots."""
+    def post(self, request, rig_id):
+        success, error_response = auth_middleware.authenticate_admin_request(request)
+        if error_response:
+            return error_response
+        response = rigs.reserve_rig_slots_handler(rig_id, request.data)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_201_CREATED)
+
+
 class CafeDetailView(APIView):
     """GET /cafes/<id>/ — Detail, PUT /cafes/<id>/ — Update, DELETE /cafes/<id>/ — Delete (not used)"""
     def get(self, request, cafe_id):

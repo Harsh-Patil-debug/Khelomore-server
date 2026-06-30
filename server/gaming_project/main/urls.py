@@ -33,6 +33,7 @@ urlpatterns = [
     # ── Hardware Rigs ─────────────────────────────────────────────────────────
     path('rigs/', RigListCreateView.as_view(), name='rigs'),
     path('rigs/<str:rig_id>/', RigDetailView.as_view(), name='rig_detail'),
+    path('rigs/<str:rig_id>/reserve/', RigReserveView.as_view(), name='rig_reserve'),
 
     # ── Payments ──────────────────────────────────────────────────────────────
     path('payments/create-order/', RazorpayOrderCreateView.as_view(), name='create_razorpay_order'),

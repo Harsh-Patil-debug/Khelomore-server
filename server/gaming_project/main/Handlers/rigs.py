@@ -19,12 +19,18 @@ SEED_RIG_TEMPLATES = [
 
 def map_rig_doc(doc):
     """Maps a MongoDB rig document to the format expected by the frontend."""
+    raw_name = doc.get("name", "")
+    number_fallback = raw_name.split("#")[-1].strip() if "#" in raw_name else raw_name
+    raw_type = doc.get("type", "PC").lower()
+
     return {
         "id": str(doc["_id"]),
         "cafeId": doc.get("cafe_id"),
-        "type": doc.get("type", "PC"),
-        "name": doc.get("name", ""),
-        "spec": doc.get("spec", ""),
+        "type": raw_type,
+        "name": raw_name,
+        "number": doc.get("number") or number_fallback,
+        "spec": doc.get("spec") or doc.get("specs") or "",
+        "specs": doc.get("spec") or doc.get("specs") or "",
         "status": doc.get("status", "available"),
         "zone": doc.get("zone", "Standard"),
         "hourly_price": doc.get("hourly_price", 100),
@@ -37,8 +43,41 @@ def get_rigs_handler(cafe_id=None):
         return {"status": "error", "message": "MongoDB connection is not established."}
 
     try:
-        # Auto-seed if the rigs collection is completely empty
-        if db_main.rigs.count_documents({}) == 0:
+        # Auto-seed per cafe if cafe_id is provided and that cafe has 0 rigs
+        if cafe_id and db_main.rigs.count_documents({"cafe_id": cafe_id}) == 0:
+            rigs_to_insert = []
+            for template in SEED_RIG_TEMPLATES:
+                name = template["name"]
+                number = name.split("#")[-1].strip() if "#" in name else name
+                spec = template["spec"]
+                
+                # Determine zone and price based on type/spec
+                if template["type"] == "PS5":
+                    zone = "Console Lounge"
+                    price = 160
+                elif "RTX 4090" in spec:
+                    zone = "VIP Elite Zone"
+                    price = 200
+                else:
+                    zone = "Regular Zone"
+                    price = 150
+                
+                rigs_to_insert.append({
+                    "cafe_id": cafe_id,
+                    "type": template["type"],
+                    "name": name,
+                    "number": number,
+                    "spec": spec,
+                    "status": "available",
+                    "zone": zone,
+                    "hourly_price": price
+                })
+            if rigs_to_insert:
+                db_main.rigs.insert_many(rigs_to_insert)
+                print(f"[KheloMore] Auto-seeded {len(rigs_to_insert)} rigs for cafe: {cafe_id}")
+        
+        # General fallback: if collection is completely empty, seed for all cafes
+        elif db_main.rigs.count_documents({}) == 0:
             cafes = list(db_main.cafes.find({}))
             seeded_count = 0
             if cafes:
@@ -46,29 +85,34 @@ def get_rigs_handler(cafe_id=None):
                 for cafe in cafes:
                     cafe_id_str = str(cafe["_id"])
                     for template in SEED_RIG_TEMPLATES:
+                        name = template["name"]
+                        number = name.split("#")[-1].strip() if "#" in name else name
+                        spec = template["spec"]
+                        
+                        if template["type"] == "PS5":
+                            zone = "Console Lounge"
+                            price = 160
+                        elif "RTX 4090" in spec:
+                            zone = "VIP Elite Zone"
+                            price = 200
+                        else:
+                            zone = "Regular Zone"
+                            price = 150
+
                         rigs_to_insert.append({
                             "cafe_id": cafe_id_str,
                             "type": template["type"],
-                            "name": template["name"],
-                            "spec": template["spec"]
+                            "name": name,
+                            "number": number,
+                            "spec": spec,
+                            "status": "available",
+                            "zone": zone,
+                            "hourly_price": price
                         })
                 if rigs_to_insert:
                     db_main.rigs.insert_many(rigs_to_insert)
                     seeded_count = len(rigs_to_insert)
-            
-            # Also seed some global/unassigned rigs just in case
-            global_rigs = []
-            for template in SEED_RIG_TEMPLATES:
-                global_rigs.append({
-                    "cafe_id": None,
-                    "type": template["type"],
-                    "name": f"Global {template['name']}",
-                    "spec": template["spec"]
-                })
-            db_main.rigs.insert_many(global_rigs)
-            seeded_count += len(global_rigs)
-            
-            print(f"[KheloMore] Auto-seeded {seeded_count} hardware rigs in MongoDB.")
+            print(f"[KheloMore] Auto-seeded {seeded_count} global hardware rigs in MongoDB.")
 
         # Build query
         query = {}
@@ -82,28 +126,46 @@ def get_rigs_handler(cafe_id=None):
         return {"status": "error", "message": f"Failed to retrieve rigs: {e}"}
 
 def create_rig_handler(data):
-    """Creates a new hardware rig (PC or PS5) in MongoDB."""
+    """Creates a new hardware rig in MongoDB."""
     db_main = get_db()
     if db_main is None:
         return {"status": "error", "message": "MongoDB connection is not established."}
 
     try:
-        rig_type = data.get("type")
-        name = data.get("name")
-        spec = data.get("spec")
+        rig_type_raw = str(data.get("type", "PC")).upper()
+        if rig_type_raw == "RACING_SIM":
+            rig_type = "Racing Sim"
+        elif rig_type_raw == "VR":
+            rig_type = "VR Station"
+        else:
+            rig_type = rig_type_raw
+
+        name_input = data.get("name")
+        if not name_input:
+            return {"status": "error", "message": "Rig 'name' is a required field."}
+
+        number = data.get("number") or (name_input.split("#")[-1].strip() if "#" in name_input else "")
+        base_name = name_input.split("#")[0].strip()
+        if number:
+            name = f"{base_name} #{number}"
+        else:
+            name = name_input
+
+        spec = data.get("spec") or data.get("specs") or ""
+        status = data.get("status", "available")
+        zone = data.get("zone", "Standard")
+        hourly_price = int(data.get("hourly_price") or data.get("hourlyPrice") or 100)
         cafe_id = data.get("cafeId") or data.get("cafe_id")
-
-        if not rig_type or not name:
-            return {"status": "error", "message": "Rig 'type' and 'name' are required fields."}
-
-        if rig_type not in ["PC", "PS5"]:
-            return {"status": "error", "message": "Rig type must be either 'PC' or 'PS5'."}
 
         rig_doc = {
             "cafe_id": cafe_id,
             "type": rig_type,
             "name": name,
-            "spec": spec or ""
+            "number": number,
+            "spec": spec,
+            "status": status,
+            "zone": zone,
+            "hourly_price": hourly_price
         }
 
         result = db_main.rigs.insert_one(rig_doc)
@@ -142,16 +204,46 @@ def update_rig_handler(rig_id, data):
         if not ObjectId.is_valid(rig_id):
             return {"status": "error", "message": "Invalid rig ID format."}
 
+        existing_doc = db_main.rigs.find_one({"_id": ObjectId(rig_id)})
+        if not existing_doc:
+            return {"status": "error", "message": "Rig not found."}
+
         # Fields allowed to update
         update_fields = {}
         if "type" in data:
-            if data["type"] not in ["PC", "PS5"]:
-                return {"status": "error", "message": "Rig type must be either 'PC' or 'PS5'."}
-            update_fields["type"] = data["type"]
-        if "name" in data:
-            update_fields["name"] = data["name"]
-        if "spec" in data:
-            update_fields["spec"] = data["spec"]
+            rt = str(data["type"]).upper()
+            if rt == "RACING_SIM":
+                update_fields["type"] = "Racing Sim"
+            elif rt == "VR":
+                update_fields["type"] = "VR Station"
+            else:
+                update_fields["type"] = rt
+
+        name_input = data.get("name")
+        number_input = data.get("number")
+        
+        if name_input is not None or number_input is not None:
+            current_name = name_input if name_input is not None else existing_doc.get("name", "")
+            current_number = number_input if number_input is not None else existing_doc.get("number", "")
+            
+            base_name = current_name.split("#")[0].strip()
+            if current_number:
+                update_fields["name"] = f"{base_name} #{current_number}"
+                update_fields["number"] = current_number
+            else:
+                update_fields["name"] = current_name
+                update_fields["number"] = ""
+        if "spec" in data or "specs" in data:
+            update_fields["spec"] = data.get("spec") or data.get("specs")
+        if "status" in data:
+            update_fields["status"] = data["status"]
+        if "zone" in data:
+            update_fields["zone"] = data["zone"]
+        if "hourly_price" in data or "hourlyPrice" in data:
+            try:
+                update_fields["hourly_price"] = int(data.get("hourly_price") or data.get("hourlyPrice"))
+            except (ValueError, TypeError):
+                pass
         if "cafeId" in data or "cafe_id" in data:
             update_fields["cafe_id"] = data.get("cafeId") or data.get("cafe_id")
 
@@ -190,3 +282,100 @@ def delete_rig_handler(rig_id):
         return {"status": "success", "message": "Rig successfully deleted."}
     except Exception as e:
         return {"status": "error", "message": f"Failed to delete rig: {e}"}
+
+def reserve_rig_slots_handler(rig_id, data):
+    """Creates an admin booking/reservation for a specific rig and list of slots."""
+    import random
+    from .bookings_handler import calculate_booking_status_and_time, IST
+    
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+
+    try:
+        if not ObjectId.is_valid(rig_id):
+            return {"status": "error", "message": "Invalid rig ID format."}
+
+        rig = db_main.rigs.find_one({"_id": ObjectId(rig_id)})
+        if not rig:
+            return {"status": "error", "message": "Rig not found."}
+
+        cafe_id = rig.get("cafe_id")
+        cafe = db_main.cafes.find_one({"_id": ObjectId(cafe_id)}) if ObjectId.is_valid(cafe_id) else None
+        cafe_name = cafe.get("name", "Unknown Cafe") if cafe else "Unknown Cafe"
+
+        date = data.get("date")
+        slots = data.get("slots") # list of slot strings, e.g. ["10:00 AM - 11:00 AM"]
+        admin_email = data.get("admin_email") or "admin@khelomore.com"
+
+        if not date or not slots:
+            return {"status": "error", "message": "Parameters 'date' and 'slots' are required."}
+
+        # Format rig display name
+        rig_spec = rig.get("spec", "")
+        rig_display_name = f"{rig.get('name')} · {rig_spec}" if rig_spec else rig.get("name", "")
+
+        # Check for overlap/duplicate reservation on the same station and slot
+        existing_bookings = list(db_main.bookings.find({
+            "cafe_id": cafe_id,
+            "date": date,
+            "status": {"$in": ["Upcoming", "Active"]}
+        }))
+
+        rig_short_name = rig.get("name").replace("•", "·").split("·")[0].strip()
+
+        # Check if any slot has an overlap booking on this rig
+        for slot in slots:
+            for eb in existing_bookings:
+                eb_rig = eb.get("rig", "").replace("•", "·").split("·")[0].strip()
+                if eb_rig == rig_short_name:
+                    eb_slots = eb.get("slots", [])
+                    if slot in eb_slots:
+                        return {
+                            "status": "error", 
+                            "message": f"Conflict: Slot '{slot}' is already booked on this station."
+                        }
+
+        # Create booking document
+        code = str(random.randint(100000, 999999))
+        status, remaining_time = calculate_booking_status_and_time(date, slots)
+
+        booking_doc = {
+            "user_email": admin_email,
+            "user_name": "ADMIN RESERVED",
+            "cafe_id": cafe_id,
+            "cafe_name": cafe_name,
+            "zone": rig.get("zone", "Standard"),
+            "date": date,
+            "slots": slots,
+            "slot": ", ".join(slots),
+            "price": 0, # Admin reservations are free
+            "code": code,
+            "rig": rig_display_name,
+            "status": status,
+            "createdAt": datetime.now(IST)
+        }
+        if status == "Active" and remaining_time > 0:
+            booking_doc["remainingTimeSeconds"] = remaining_time
+
+        db_main.bookings.insert_one(booking_doc)
+
+        # Set rig status to reserved in the rigs collection
+        db_main.rigs.update_one(
+            {"_id": ObjectId(rig_id)},
+            {"$set": {"status": "reserved"}}
+        )
+
+        return {
+            "status": "success",
+            "message": "Slots reserved successfully.",
+            "booking": {
+                "id": str(booking_doc.get("_id") or ""),
+                "rig": rig_display_name,
+                "slots": slots,
+                "date": date,
+                "status": status
+            }
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to reserve slots: {e}"}

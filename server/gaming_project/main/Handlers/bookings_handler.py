@@ -156,15 +156,22 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
         if rig:
             # Clean and normalize bullet symbol to center dot
             rig = rig.replace("•", "·").replace("  ", " ").strip()
+            rig_name = rig.split("·")[0].strip()
+            db_rig = db_main.rigs.find_one({"cafe_id": cafe_id, "name": rig_name})
+            if db_rig and db_rig.get("status") == "maintenance":
+                return {
+                    "status": "error",
+                    "message": f"Rig '{rig_name}' is currently under maintenance and cannot be booked."
+                }, 400
         else:
             # Rig auto-assignment
             rigs = list(db_main.rigs.find({"cafe_id": cafe_id}))
             
-            # Filter rigs by type based on zone
+            # Filter rigs by type based on zone, ignoring any under maintenance
             if zone == "Console Lounge":
-                matching_rigs = [r for r in rigs if r.get("type", "").upper() in ["PS5", "XBOX"]]
+                matching_rigs = [r for r in rigs if r.get("type", "").upper() in ["PS5", "XBOX"] and r.get("status") != "maintenance"]
             else:
-                matching_rigs = [r for r in rigs if r.get("type", "").upper() == "PC"]
+                matching_rigs = [r for r in rigs if r.get("type", "").upper() == "PC" and r.get("status") != "maintenance"]
 
             if matching_rigs:
                 booked_rigs = set()
