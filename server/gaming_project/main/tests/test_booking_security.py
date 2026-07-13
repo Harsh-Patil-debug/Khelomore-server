@@ -1,0 +1,190 @@
+# test_booking_security.py
+# Regression tests for: booking detail IDOR (update/delete), booking-list IDOR (cafe_id
+# scoped listing), and the payment-integrity fix (server-side price + Razorpay verification).
+
+from bson import ObjectId
+
+from .base import SecurityTestCase
+
+
+class BookingDetailOwnershipTests(SecurityTestCase):
+    """Guards against any authenticated user modifying/deleting another user's booking."""
+
+    def test_unrelated_user_cannot_delete_someone_elses_booking(self):
+        owner_email, _ = self.make_active_user()
+        attacker_email, attacker_token = self.make_active_user()
+        cafe_id = self.make_cafe(owner_email="cafe-owner-a@khelomore.invalid")
+        booking_id = self.make_booking(owner_email, cafe_id)
+
+        resp = self.client.delete(f"/api/v1/main/bookings/{booking_id}/", **self.auth_header(attacker_token))
+        self.assertEqual(resp.status_code, 403)
+        self.assertIsNotNone(self.db.bookings.find_one({"_id": ObjectId(booking_id)}))
+
+    def test_unrelated_user_cannot_update_someone_elses_booking(self):
+        owner_email, _ = self.make_active_user()
+        attacker_email, attacker_token = self.make_active_user()
+        cafe_id = self.make_cafe(owner_email="cafe-owner-b@khelomore.invalid")
+        booking_id = self.make_booking(owner_email, cafe_id, payment_status="pending")
+
+        resp = self.client.put(
+            f"/api/v1/main/bookings/{booking_id}/",
+            {"payment_status": "paid"},
+            format="json",
+            **self.auth_header(attacker_token),
+        )
+        self.assertEqual(resp.status_code, 403)
+        doc = self.db.bookings.find_one({"_id": ObjectId(booking_id)})
+        self.assertEqual(doc["payment_status"], "pending")
+
+    def test_owner_can_delete_their_own_booking(self):
+        owner_email, owner_token = self.make_active_user()
+        cafe_id = self.make_cafe(owner_email="cafe-owner-c@khelomore.invalid")
+        booking_id = self.make_booking(owner_email, cafe_id)
+
+        resp = self.client.delete(f"/api/v1/main/bookings/{booking_id}/", **self.auth_header(owner_token))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(self.db.bookings.find_one({"_id": ObjectId(booking_id)}))
+
+    def test_owner_cannot_self_mark_their_own_booking_as_paid(self):
+        """A booking's own user is not a 'privileged' caller — only the cafe owner/super
+        admin may change payment_status, otherwise a user could grant themselves a free
+        paid booking by PUTting their own record."""
+        owner_email, owner_token = self.make_active_user()
+        cafe_id = self.make_cafe(owner_email="cafe-owner-d@khelomore.invalid")
+        booking_id = self.make_booking(owner_email, cafe_id, payment_status="pending")
+
+        # Mix payment_status in with a field an owner IS allowed to touch, to prove
+        # payment_status specifically gets filtered out rather than the whole request
+        # merely having nothing left to update.
+        resp = self.client.put(
+            f"/api/v1/main/bookings/{booking_id}/",
+            {"status": "Cancelled", "payment_status": "paid"},
+            format="json",
+            **self.auth_header(owner_token),
+        )
+        self.assertEqual(resp.status_code, 200)  # allowed to touch their own booking...
+        doc = self.db.bookings.find_one({"_id": ObjectId(booking_id)})
+        self.assertEqual(doc["status"], "Cancelled")       # ...the allowed field updates...
+        self.assertEqual(doc["payment_status"], "pending")  # ...but payment_status must not move
+
+    def test_cafe_owner_can_mark_a_customers_booking_as_paid(self):
+        cafe_owner_email, cafe_owner_token = self.make_active_user(role="admin")
+        cafe_id = self.make_cafe(owner_email=cafe_owner_email)
+        customer_email, _ = self.make_active_user()
+        booking_id = self.make_booking(customer_email, cafe_id, payment_status="pending")
+
+        resp = self.client.put(
+            f"/api/v1/main/bookings/{booking_id}/",
+            {"payment_status": "paid"},
+            format="json",
+            **self.auth_header(cafe_owner_token),
+        )
+        self.assertEqual(resp.status_code, 200)
+        doc = self.db.bookings.find_one({"_id": ObjectId(booking_id)})
+        self.assertEqual(doc["payment_status"], "paid")
+
+
+class BookingListOwnershipTests(SecurityTestCase):
+    """Guards against any authenticated user listing another cafe's full booking data
+    (customer names/emails/phone numbers/codes) via ?cafe_id=."""
+
+    def test_unrelated_user_cannot_list_bookings_by_cafe_id(self):
+        cafe_owner_email, _ = self.make_active_user(role="admin")
+        cafe_id = self.make_cafe(owner_email=cafe_owner_email)
+        customer_email, customer_token = self.make_active_user()
+        self.make_booking(customer_email, cafe_id)
+
+        resp = self.client.get(f"/api/v1/main/bookings/?cafe_id={cafe_id}", **self.auth_header(customer_token))
+        self.assertEqual(resp.status_code, 403)
+
+    def test_cafe_owner_can_list_bookings_by_cafe_id(self):
+        cafe_owner_email, cafe_owner_token = self.make_active_user(role="admin")
+        cafe_id = self.make_cafe(owner_email=cafe_owner_email)
+        customer_email, _ = self.make_active_user()
+        self.make_booking(customer_email, cafe_id)
+
+        resp = self.client.get(f"/api/v1/main/bookings/?cafe_id={cafe_id}", **self.auth_header(cafe_owner_token))
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreaterEqual(len(resp.json()["bookings"]), 1)
+
+    def test_super_admin_can_list_bookings_by_cafe_id(self):
+        # A dynamic super_admin JWT, not the static ADMIN_TOKEN — the static token isn't
+        # accepted by authenticate_request (JWT/cookie only), which this view also calls,
+        # independent of the cafe_id-ownership fix under test here.
+        cafe_owner_email, _ = self.make_active_user(role="admin")
+        cafe_id = self.make_cafe(owner_email=cafe_owner_email)
+        customer_email, _ = self.make_active_user()
+        self.make_booking(customer_email, cafe_id)
+        _, super_admin_token = self.make_active_user(role="super_admin", collection="super_admin")
+
+        resp = self.client.get(f"/api/v1/main/bookings/?cafe_id={cafe_id}", **self.auth_header(super_admin_token))
+        self.assertEqual(resp.status_code, 200)
+
+
+class BookingPaymentIntegrityTests(SecurityTestCase):
+    """Guards against client-controlled price/payment_status bypassing real payment."""
+
+    def test_paid_slot_booking_rejected_without_payment_verification(self):
+        customer_email, customer_token = self.make_active_user()
+        cafe_id = self.make_cafe(owner_email="cafe-owner-e@khelomore.invalid", price_per_hour=200)
+
+        resp = self.client.post(
+            "/api/v1/main/bookings/",
+            {
+                "cafe_id": cafe_id,
+                "cafe_name": "Sectest Cafe",
+                "zone": "Regular Zone",
+                "date": "2099-01-01",
+                "slots": ["10:00 AM - 11:00 AM"],
+                "price": 1,          # attacker-supplied bogus low price — must be ignored
+                "paymentStatus": "paid",  # attacker-supplied — must be ignored
+            },
+            format="json",
+            **self.auth_header(customer_token),
+        )
+        self.assertEqual(resp.status_code, 402)
+        # nothing should have been booked
+        self.assertIsNone(self.db.bookings.find_one({"cafe_id": cafe_id, "user_email": customer_email}))
+
+    def test_free_slot_booking_succeeds_without_payment(self):
+        customer_email, customer_token = self.make_active_user()
+        cafe_id = self.make_cafe(owner_email="cafe-owner-f@khelomore.invalid", price_per_hour=0)
+
+        resp = self.client.post(
+            "/api/v1/main/bookings/",
+            {
+                "cafe_id": cafe_id,
+                "cafe_name": "Sectest Cafe",
+                "zone": "Regular Zone",
+                "date": "2099-01-02",
+                "slots": ["11:00 AM - 12:00 PM"],
+            },
+            format="json",
+            **self.auth_header(customer_token),
+        )
+        self.assertEqual(resp.status_code, 201)
+        booking = resp.json()["booking"]
+        self.track("bookings", ObjectId(booking["id"]))
+        self.assertEqual(booking["price"], 0)
+
+    def test_price_is_computed_server_side_from_cafe_rate_not_client_input(self):
+        customer_email, customer_token = self.make_active_user()
+        cafe_id = self.make_cafe(owner_email="cafe-owner-g@khelomore.invalid", price_per_hour=0)
+
+        resp = self.client.post(
+            "/api/v1/main/bookings/",
+            {
+                "cafe_id": cafe_id,
+                "cafe_name": "Sectest Cafe",
+                "zone": "Regular Zone",
+                "date": "2099-01-03",
+                "slots": ["01:00 PM - 02:00 PM"],
+                "price": 999999,  # attacker tries to inflate/deflate — must be ignored either way
+            },
+            format="json",
+            **self.auth_header(customer_token),
+        )
+        self.assertEqual(resp.status_code, 201)
+        booking = resp.json()["booking"]
+        self.track("bookings", ObjectId(booking["id"]))
+        self.assertEqual(booking["price"], 0)  # cafe's real rate (0), not the client's 999999

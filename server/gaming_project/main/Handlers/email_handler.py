@@ -11,6 +11,7 @@ import random
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
+from django.conf import settings
 
 load_dotenv()
 
@@ -50,13 +51,16 @@ def send_otp_email(recipient: str, otp: str, gamertag: str = "PLAYER", purpose: 
     Sends a 6-digit OTP for login or signup verification.
     purpose: 'login' | 'signup' | 'verification'
     """
-    # Always print OTP to console for local development
-    print("\n" + "=" * 55)
-    print(f"[KHELOMORE] OTP INTERCEPTED — {purpose.upper()}")
-    print(f"  Player  : {gamertag}")
-    print(f"  Email   : {recipient}")
-    print(f"  OTP Code: {otp}")
-    print("=" * 55 + "\n")
+    # SECURITY: OTP codes must never hit server logs in production — anyone with log
+    # access could otherwise authenticate as any user (including super admins) without
+    # ever touching their inbox. Only print in local dev (DEBUG=True).
+    if settings.DEBUG:
+        print("\n" + "=" * 55)
+        print(f"[KHELOMORE] OTP INTERCEPTED — {purpose.upper()}")
+        print(f"  Player  : {gamertag}")
+        print(f"  Email   : {recipient}")
+        print(f"  OTP Code: {otp}")
+        print("=" * 55 + "\n")
 
     action_label = "Sign Up" if purpose == "signup" else "Login"
     subject = f"KheloMore — Your {action_label} Verification Code: {otp}"
@@ -177,12 +181,14 @@ def send_welcome_email(recipient: str, gamertag: str = "PLAYER") -> bool:
 
 
 def send_admin_otp_email(recipient: str, otp: str, name: str = "Admin") -> bool:
-    """Admin OTP email (stub — logs to console for now)."""
-    print(f"[ADMIN OTP] {name} / {recipient} → {otp}")
+    """Admin OTP email."""
+    if settings.DEBUG:
+        print(f"[ADMIN OTP] {name} / {recipient} → {otp}")
     return send_otp_email(recipient, otp, gamertag=name, purpose="admin login")
 
 
 def send_sms_otp(phone_number: str, otp: str) -> bool:
     """SMS OTP stub — always succeeds (no Twilio configured for KheloMore)."""
-    print(f"[SMS OTP STUB] {phone_number} → {otp}")
+    if settings.DEBUG:
+        print(f"[SMS OTP STUB] {phone_number} → {otp}")
     return True

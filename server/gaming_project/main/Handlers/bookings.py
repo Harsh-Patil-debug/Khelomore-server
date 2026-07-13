@@ -66,7 +66,9 @@ def map_booking_doc(doc):
         "rig": doc.get("rig", ""),
         "remainingTimeSeconds": int(doc.get("remaining_time_seconds")) if doc.get("remaining_time_seconds") is not None else None,
         "userName": doc.get("user_name", "GUEST_PLAYER"),
-        "userEmail": doc.get("user_email", "")
+        "userEmail": doc.get("user_email", ""),
+        "userPhone": doc.get("user_phone") or doc.get("userPhone") or "",
+        "paymentStatus": doc.get("payment_status") or doc.get("paymentStatus") or "pending"
     }
 
 def get_bookings_handler(cafe_id=None):
@@ -189,8 +191,12 @@ def delete_booking_handler(booking_id):
         return {"status": "error", "message": f"Failed to delete booking: {e}"}
 
 
-def update_booking_handler(booking_id, data):
-    """Updates status or other attributes of an existing booking."""
+def update_booking_handler(booking_id, data, allow_payment_status_change=False):
+    """Updates status or other attributes of an existing booking.
+
+    payment_status may only be changed by a privileged caller (cafe admin/super admin) —
+    a booking's own user must never be able to self-mark their booking as paid.
+    """
     db_main = get_db()
     if db_main is None:
         return {"status": "error", "message": "MongoDB connection is not established."}
@@ -204,6 +210,11 @@ def update_booking_handler(booking_id, data):
             update_fields["date"] = data["date"]
         if "rig" in data:
             update_fields["rig"] = data["rig"]
+        if allow_payment_status_change:
+            if "payment_status" in data:
+                update_fields["payment_status"] = data["payment_status"]
+            if "paymentStatus" in data:
+                update_fields["payment_status"] = data["paymentStatus"]
 
         if not update_fields:
             return {"status": "error", "message": "No valid fields to update."}

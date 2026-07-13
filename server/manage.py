@@ -7,6 +7,10 @@ import sys
 def main():
     """Run administrative tasks."""
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'server.settings')
+    if len(sys.argv) > 1 and sys.argv[1] == 'test':
+        # SAFETY: route test runs to an isolated MongoDB database (same cluster, different
+        # name) so the test suite never reads or writes real production data.
+        os.environ['MONGO_DB_NAME'] = os.getenv('MONGO_DB_NAME_TEST', 'KheloMoreDB_test')
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

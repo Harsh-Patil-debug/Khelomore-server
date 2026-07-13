@@ -6,18 +6,41 @@ Django settings for KheloMore Gaming Hub backend.
 from pathlib import Path
 import os
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'khelomore-dev-secret-key-change-in-production')
 
-DEBUG = os.getenv('DEBUG', 'True') == 'True'
+def _require_env(name):
+    """
+    SECURITY: fail closed instead of silently falling back to a hardcoded default secret.
+    A hardcoded fallback here is visible to anyone with repo access and would grant
+    authentication/session-forging capability in any deployment that forgets to set it.
+    """
+    value = os.getenv(name)
+    if not value:
+        raise ImproperlyConfigured(f"Required environment variable '{name}' is not set.")
+    return value
 
-ALLOWED_HOSTS = ['*']
 
-NGROK_DOMAIN = 'twisting-stove-chief.ngrok-free.dev'
+SECRET_KEY = _require_env('DJANGO_SECRET_KEY')
+
+# SECURITY: default to DEBUG=False. Verbose Django error pages leak secrets, environment
+# details, and stack traces to whoever triggers a 500 — never let that be the silent
+# default. Set DEBUG=True explicitly in .env for local development.
+DEBUG = os.getenv('DEBUG', 'False') == 'True'
+
+_allowed_hosts_env = os.getenv('ALLOWED_HOSTS', '')
+if _allowed_hosts_env:
+    ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts_env.split(',') if h.strip()]
+elif DEBUG:
+    ALLOWED_HOSTS = ['*']
+else:
+    raise ImproperlyConfigured("ALLOWED_HOSTS must be set (comma-separated) via env when DEBUG=False.")
+
+NGROK_DOMAIN = os.getenv('NGROK_DOMAIN', 'twisting-stove-chief.ngrok-free.dev')
 
 
 # Application definition
@@ -34,15 +57,14 @@ INSTALLED_APPS = [
     'corsheaders',
 ]
 
-# REST Framework Configuration (Global Rate Limiting to prevent DDoS/abuse)
 REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
         'rest_framework.throttling.UserRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
-        'anon': '60/minute',   # Maximum 60 requests per minute for unauthenticated IPs
-        'user': '300/minute',  # Maximum 300 requests per minute for logged-in users
+        'anon': '2000/minute',   # Increased from 60 for development
+        'user': '10000/minute',  # Increased from 300 for development
     }
 }
 
@@ -55,10 +77,25 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'gaming_project.main.middleware.OriginValidationMiddleware',
 ]
 
-# CORS — allow all origins (tighten in production)
-CORS_ALLOW_ALL_ORIGINS = True
+# CORS
+# SECURITY: auth is cookie-based (km_gamer_token / km_admin_token / km_super_admin_token,
+# all SameSite=None so they're sent cross-site) with CORS_ALLOW_CREDENTIALS=True. Combined
+# with a wildcard origin, ANY website could read authenticated API responses on behalf of a
+# logged-in user/admin/super-admin via a simple cross-origin fetch(). Set CORS_ALLOWED_ORIGINS
+# (comma-separated, e.g. https://app.khelomore.com,https://admin.khelomore.com) once real
+# frontend domains are known — falls back to wildcard only while DEBUG=True.
+_cors_origins_env = os.getenv('CORS_ALLOWED_ORIGINS', '')
+CORS_ALLOWED_ORIGINS = []
+CORS_ALLOW_ALL_ORIGINS = False
+if _cors_origins_env:
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins_env.split(',') if o.strip()]
+elif DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    raise ImproperlyConfigured("CORS_ALLOWED_ORIGINS must be set (comma-separated) via env when DEBUG=False.")
 CORS_ALLOW_CREDENTIALS = True
 
 from corsheaders.defaults import default_headers
@@ -143,5 +180,24 @@ RAZORPAY_KEY_ID = os.getenv('RAZORPAY_KEY_ID', '')
 RAZORPAY_KEY_SECRET = os.getenv('RAZORPAY_KEY_SECRET', '')
 
 # Admin Security
-ADMIN_TOKEN = os.getenv('ADMIN_TOKEN', 'km_admin_sec_3ea5c89fbf0e8ad9c922da1713d2f9b1740b2e8a15cfbceefea38b5fdf5e27a6')
+ADMIN_TOKEN = _require_env('ADMIN_TOKEN')
+
+# Reused by OriginValidationMiddleware (gaming_project/main/middleware.py) for CSRF-style
+# protection on cookie-authenticated state-changing requests. Empty (i.e. not enforced)
+# until CORS_ALLOWED_ORIGINS is explicitly configured.
+ALLOWED_ORIGINS = CORS_ALLOWED_ORIGINS
+
+
+# ── Security headers (skipped in DEBUG so local http:// dev keeps working) ─────────────────
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = 'same-origin'
+X_FRAME_OPTIONS = 'DENY'
+
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
 

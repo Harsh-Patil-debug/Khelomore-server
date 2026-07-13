@@ -56,9 +56,27 @@ def list_sessions_handler(cafe_id: str):
         }))
 
         for b in bookings:
+            b_status = b.get("status")
             slots = b.get("slots", [])
             _, latest_end = parse_slot_times(today_str, slots)
-            if now > latest_end:
+            
+            should_expire = False
+            if b_status == "Active":
+                actual_end_raw = b.get("actual_end_at")
+                if actual_end_raw:
+                    try:
+                        actual_end_dt = datetime.fromisoformat(actual_end_raw)
+                        if actual_end_dt.tzinfo is None:
+                            actual_end_dt = actual_end_dt.replace(tzinfo=IST)
+                        should_expire = (now > actual_end_dt)
+                    except Exception:
+                        should_expire = (now > latest_end)
+                else:
+                    should_expire = (now > latest_end)
+            else:
+                should_expire = (now > latest_end)
+
+            if should_expire:
                 # Slot has ended - automatically mark completed
                 db_main.bookings.update_one(
                     {"_id": b["_id"]},
@@ -70,6 +88,12 @@ def list_sessions_handler(cafe_id: str):
                     {"cafe_id": cafe_id, "name": rig_name},
                     {"$set": {"status": "available"}}
                 )
+
+        # Reset non-maintenance rigs status to "available" initially so they are clean
+        db_main.rigs.update_many(
+            {"cafe_id": cafe_id, "status": {"$ne": "maintenance"}},
+            {"$set": {"status": "available"}}
+        )
 
         # 2. Re-fetch current bookings & rigs (including future bookings)
         bookings = list(db_main.bookings.find({
@@ -96,15 +120,19 @@ def list_sessions_handler(cafe_id: str):
             slots = b.get("slots", [])
             earliest_start, latest_end = parse_slot_times(b.get("date"), slots)
 
-            # Sync rig status to most urgent booking (Active > reserved)
-            expected_rig_status = "occupied" if b_status == "Active" else "reserved"
-            current_rig_status = matched_rig.get("status", "available")
-            if current_rig_status not in ["occupied"] and expected_rig_status == "occupied":
-                db_main.rigs.update_one({"_id": matched_rig["_id"]}, {"$set": {"status": "occupied"}})
-                matched_rig["status"] = "occupied"
-            elif current_rig_status == "available":
-                db_main.rigs.update_one({"_id": matched_rig["_id"]}, {"$set": {"status": "reserved"}})
-                matched_rig["status"] = "reserved"
+            # Sync rig status to most urgent booking ONLY if the slot is currently active/running!
+            is_active_time = (b.get("date") == today_str and earliest_start <= now <= latest_end)
+            
+            if b_status == "Active":
+                # Active session always marks rig as occupied
+                if matched_rig.get("status") != "maintenance":
+                    db_main.rigs.update_one({"_id": matched_rig["_id"]}, {"$set": {"status": "occupied"}})
+                    matched_rig["status"] = "occupied"
+            elif b_status == "Upcoming" and is_active_time:
+                # Upcoming booking only marks rig as reserved if we are currently in the slot time
+                if matched_rig.get("status") not in ["occupied", "maintenance"]:
+                    db_main.rigs.update_one({"_id": matched_rig["_id"]}, {"$set": {"status": "reserved"}})
+                    matched_rig["status"] = "reserved"
 
             # Use admin-set actual_end_at if available, else fall back to slot end
             actual_end_at_raw = b.get("actual_end_at")
@@ -143,10 +171,11 @@ def list_sessions_handler(cafe_id: str):
                 "system_id": rig_id_str,
                 "rig_name": b_rig_name,
                 "date": b.get("date"),
+                "slots": slots,
                 "customer_name": cust_name,
                 "start_at": b.get("started_at") or earliest_start.isoformat(),
                 "scheduled_end_at": synced_end.isoformat(),
-                "time_label": f"{b.get('date', today_str)} · {earliest_start.strftime('%I:%M %p')} - {latest_end.strftime('%I:%M %p')}",
+                "time_label": f"{b.get('date', today_str)} · {b.get('slot') or ', '.join(slots)}",
                 "status": "active" if b_status == "Active" else "reserved"
             })
 
@@ -186,10 +215,26 @@ def start_session_handler(booking_id: str = None, data: dict = None):
             slots = booking.get("slots", [])
             booking_date = booking.get("date", today_str)
             try:
-                _, latest_end = parse_slot_times(booking_date, slots)
-                # actual_end_at = now + (slot duration), capped to slot end
-                slot_duration = latest_end - min(now, latest_end)
-                actual_end_at = now + slot_duration
+                # Sum individual slot durations to support non-contiguous slots correctly
+                scheduled_duration = timedelta()
+                for slot in slots:
+                    parts = slot.split("-")
+                    if len(parts) == 2:
+                        try:
+                            st = datetime.strptime(f"{booking_date} {parts[0].strip()}", "%Y-%m-%d %I:%M %p").replace(tzinfo=IST)
+                            et = datetime.strptime(f"{booking_date} {parts[1].strip()}", "%Y-%m-%d %I:%M %p").replace(tzinfo=IST)
+                            if et <= st:
+                                et += timedelta(days=1)
+                            scheduled_duration += (et - st)
+                        except Exception:
+                            scheduled_duration += timedelta(hours=1)
+                    else:
+                        scheduled_duration += timedelta(hours=1)
+
+                if scheduled_duration.total_seconds() == 0:
+                    scheduled_duration = timedelta(hours=1)
+
+                actual_end_at = now + scheduled_duration
             except Exception:
                 actual_end_at = now + timedelta(hours=1)
 
@@ -257,8 +302,8 @@ def start_session_handler(booking_id: str = None, data: dict = None):
 
 def end_session_handler(booking_id: str):
     """
-    Ends a session early, releasing any future slots from the booking document
-    while keeping the payment/price intact for the admin.
+    Ends a session early, setting status to Completed and setting actual_end_at to now.
+    Keeps all slots and original price/amount intact for history/payment reporting.
     """
     db_main = get_db()
     if db_main is None:
@@ -270,34 +315,13 @@ def end_session_handler(booking_id: str):
         if not booking:
             return {"status": "error", "message": "Booking not found."}
 
-        slots = booking.get("slots", [])
-        date_str = booking.get("date")
-        
-        # Identify unused future slots
-        used_slots = []
-        for slot in slots:
-            parts = slot.split("-")
-            if len(parts) == 2:
-                try:
-                    slot_start = datetime.strptime(f"{date_str} {parts[0].strip()}", "%Y-%m-%d %I:%M %p").replace(tzinfo=IST)
-                    # If this slot starts in the future (more than 5 mins from now), it is released
-                    if now < slot_start - timedelta(minutes=5):
-                        continue
-                except Exception:
-                    pass
-            used_slots.append(slot)
-
-        # Enforce keeping at least the first slot so booking document remains valid
-        if not used_slots and slots:
-            used_slots = [slots[0]]
-
-        # Update the booking slots (releasing the unused future ones) and status to Completed
+        # Keep original price, amount, slots, and slot intact, only set status and actual_end_at
         db_main.bookings.update_one(
             {"_id": ObjectId(booking_id)},
             {
                 "$set": {
-                    "slots": used_slots,
-                    "status": "Completed"
+                    "status": "Completed",
+                    "actual_end_at": now.isoformat()
                 }
             }
         )
@@ -311,7 +335,7 @@ def end_session_handler(booking_id: str):
 
         return {
             "status": "success",
-            "message": f"Session ended. Released {len(slots) - len(used_slots)} future slots."
+            "message": "Session ended successfully. Booking marked as Completed."
         }
     except Exception as e:
         return {"status": "error", "message": f"Failed to end session: {e}"}
@@ -344,10 +368,27 @@ def extend_session_handler(booking_id: str, minutes: int):
             new_last_slot = f"{parts[0].strip()} - {new_end.strftime('%I:%M %p')}"
             slots[-1] = new_last_slot
 
-        # Save extended slot list
+        # Also extend actual_end_at if set
+        actual_end_at_raw = booking.get("actual_end_at")
+        if actual_end_at_raw:
+            try:
+                actual_end_dt = datetime.fromisoformat(actual_end_at_raw)
+                if actual_end_dt.tzinfo is None:
+                    actual_end_dt = actual_end_dt.replace(tzinfo=IST)
+                new_actual_end = actual_end_dt + timedelta(minutes=minutes)
+            except Exception:
+                new_actual_end = new_end
+        else:
+            new_actual_end = new_end
+
+        # Save extended slots, slot string, and actual_end_at
         db_main.bookings.update_one(
             {"_id": ObjectId(booking_id)},
-            {"$set": {"slots": slots}}
+            {"$set": {
+                "slots": slots,
+                "slot": ", ".join(slots),
+                "actual_end_at": new_actual_end.isoformat()
+            }}
         )
 
         return {
@@ -356,3 +397,4 @@ def extend_session_handler(booking_id: str, minutes: int):
         }
     except Exception as e:
         return {"status": "error", "message": f"Failed to extend session: {e}"}
+

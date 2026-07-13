@@ -9,6 +9,7 @@ import cloudinary
 import cloudinary.uploader
 from bson import ObjectId
 from .db_connection import get_db
+from .upload_validation import validate_image_upload
 
 # Configure Cloudinary
 cloudinary_secret = os.getenv("CLOUDINARY_API_SECRET")
@@ -106,25 +107,15 @@ SEED_TOURNAMENTS = [
 
 
 
-def compute_is_live(starts_iso):
-    """Returns True if the tournament start time has passed (tournament is now LIVE)."""
-    if not starts_iso:
-        return False
-    try:
-        start_dt = datetime.fromisoformat(starts_iso.replace("Z", "+00:00"))
-        return datetime.now(timezone.utc) >= start_dt
-    except Exception:
-        return False
-
-
 def map_tournament_doc(doc):
     """Maps a MongoDB tournament document to the format expected by the frontend."""
     starts_iso = doc.get("starts_iso")
-    is_live = compute_is_live(starts_iso)
+    status = doc.get("status", "upcoming")
+    is_live = (status == "live")
 
-    # registrationOpen is False if admin explicitly closed it OR if tournament went live
+    # registrationOpen is True ONLY if status is upcoming and registration_open flag in MongoDB is True
     db_registration_open = doc.get("registration_open", True)
-    effective_registration_open = db_registration_open and not is_live
+    effective_registration_open = db_registration_open and (status == "upcoming")
 
     return {
         "id": str(doc["_id"]),
@@ -142,7 +133,8 @@ def map_tournament_doc(doc):
         "isLive": is_live,
         "registrationOpen": effective_registration_open,
         "images": doc.get("images", []),
-        "cafe_id": doc.get("cafe_id")
+        "cafe_id": doc.get("cafe_id"),
+        "status": status
     }
 
 
@@ -223,7 +215,11 @@ def get_tournaments_handler(cafe_id=None):
 
         query = {}
         if cafe_id:
-            query["cafe_id"] = cafe_id
+            query["$or"] = [
+                {"cafe_id": cafe_id},
+                {"cafe_id": None},
+                {"cafe_id": {"$exists": False}}
+            ]
 
         docs = list(db_main.tournaments.find(query))
         mapped = [map_tournament_doc(d) for d in docs]
@@ -300,6 +296,9 @@ def create_tournament_handler(data, files=None):
         image_url = None
         if files and "image" in files:
             image_file = files["image"]
+            validation_error = validate_image_upload(image_file)
+            if validation_error:
+                return {"status": "error", "message": validation_error}
             try:
                 upload_result = cloudinary.uploader.upload(image_file)
                 image_url = upload_result.get("secure_url")
@@ -341,7 +340,8 @@ def create_tournament_handler(data, files=None):
             "starts_iso": starts_iso,
             "registration_open": True,
             "images": final_images,
-            "cafe_id": data.get("cafe_id") or data.get("cafeId")
+            "cafe_id": data.get("cafe_id") or data.get("cafeId"),
+            "status": "upcoming"
         }
 
         result = db_main.tournaments.insert_one(tournament_doc)
@@ -364,9 +364,8 @@ def register_tournament_handler(tournament_id, user_email, data):
         if not tournament:
             return {"status": "error", "message": "Tournament not found."}
 
-        # Check if tournament registration is open and not live
-        starts_iso = tournament.get("starts_iso")
-        is_live = compute_is_live(starts_iso)
+        # Check if tournament is live (status set manually by admin)
+        is_live = tournament.get("status", "upcoming") == "live"
         if is_live:
             return {"status": "error", "message": "Tournament has already started."}
 
@@ -383,12 +382,25 @@ def register_tournament_handler(tournament_id, user_email, data):
         if not gamer_ids or not isinstance(gamer_ids, list):
             return {"status": "error", "message": "Gamer IDs are required and must be a list."}
 
+        # Entry fee is read from the tournament document (server-side/admin-set) — never trust
+        # a client-supplied amount. A paid tournament requires a verified Razorpay payment.
+        entry_fee = tournament.get("entry_fee") or 0
+        is_paid_entry = tournament.get("entry") == "Paid Entry" and int(entry_fee) > 0
+        if is_paid_entry:
+            from .payments import verify_razorpay_payment
+            razorpay_order_id = data.get("razorpay_order_id")
+            razorpay_payment_id = data.get("razorpay_payment_id")
+            razorpay_signature = data.get("razorpay_signature")
+            if not verify_razorpay_payment(razorpay_order_id, razorpay_payment_id, razorpay_signature, int(entry_fee) * 100):
+                return {"status": "error", "message": "Payment verification failed. Please complete payment before registering."}
+
         # Store registration info in database
         registration_doc = {
             "tournament_id": oid,
             "tournament_title": tournament.get("title", "Unknown Tournament"),
             "user_email": user_email.strip().lower() if user_email else None,
             "gamer_ids": gamer_ids,
+            "amount_paid": int(entry_fee) if is_paid_entry else 0,
             "registered_at": datetime.now(timezone.utc)
         }
         db_main.registrations.insert_one(registration_doc)
@@ -441,3 +453,186 @@ def get_user_registrations_handler(user_email: str):
             "message": f"Failed to retrieve registrations: {str(e)}"
         }, 500
 
+
+def update_tournament_handler(tournament_id, data, files=None):
+    """Updates an existing tournament in the database, with optional new cover image upload to Cloudinary."""
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+
+    try:
+        oid = safe_object_id(tournament_id)
+        existing = db_main.tournaments.find_one({"_id": oid})
+        if not existing:
+            return {"status": "error", "message": "Tournament not found."}
+
+        # Fields mapping
+        game = data.get("game")
+        title = data.get("title")
+        prize = data.get("prize")
+        entry = data.get("entry")
+        entry_fee = data.get("entryFee")
+        capacity = data.get("capacity")
+        unit = data.get("unit")
+        mode = data.get("mode")
+        starts = data.get("starts")
+        starts_iso = data.get("startsIso")
+        status = data.get("status")
+
+        update_doc = {}
+
+        if game is not None: update_doc["game"] = game
+        if title is not None: update_doc["title"] = title
+        if prize is not None: update_doc["prize"] = prize
+        if entry is not None: update_doc["entry"] = entry
+        if status is not None:
+            update_doc["status"] = status
+            if status == "cancelled":
+                update_doc["registration_open"] = False
+        
+        if capacity is not None:
+            try:
+                update_doc["capacity"] = int(capacity)
+            except (ValueError, TypeError):
+                return {"status": "error", "message": "Capacity must be an integer."}
+
+        if entry == "Paid Entry" or (entry is None and existing.get("entry") == "Paid Entry"):
+            if entry_fee is not None:
+                try:
+                    update_doc["entry_fee"] = int(entry_fee)
+                except (ValueError, TypeError):
+                    return {"status": "error", "message": "Entry Fee must be an integer."}
+        elif entry == "Free Entry":
+            update_doc["entry_fee"] = None
+
+        if unit is not None: update_doc["unit"] = unit
+        if mode is not None: update_doc["mode"] = mode
+        if starts is not None: update_doc["starts"] = starts
+        if starts_iso is not None: update_doc["starts_iso"] = starts_iso
+
+        # Handle Cloudinary upload if a new file is sent
+        image_url = None
+        if files and "image" in files:
+            image_file = files["image"]
+            validation_error = validate_image_upload(image_file)
+            if validation_error:
+                return {"status": "error", "message": validation_error}
+            try:
+                upload_result = cloudinary.uploader.upload(image_file)
+                image_url = upload_result.get("secure_url")
+                print(f"[Cloudinary] Successfully updated tournament image to: {image_url}")
+            except Exception as upload_err:
+                print(f"[Cloudinary] Tournament image update failed: {upload_err}")
+                print(traceback.format_exc())
+
+        if image_url:
+            update_doc["images"] = [image_url]
+
+        if update_doc:
+            db_main.tournaments.update_one({"_id": oid}, {"$set": update_doc})
+        
+        # Retrieve the updated document
+        updated_doc = db_main.tournaments.find_one({"_id": oid})
+        return {"status": "success", "tournament": map_tournament_doc(updated_doc)}
+
+    except Exception as e:
+        print(f"[KheloMore] Failed to update tournament: {e}")
+        print(traceback.format_exc())
+        return {"status": "error", "message": f"Failed to update tournament: {e}"}
+
+
+def delete_tournament_handler(tournament_id):
+    """Deletes a tournament and all of its player/team registrations from MongoDB."""
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+
+    try:
+        oid = safe_object_id(tournament_id)
+        # Check if exists
+        existing = db_main.tournaments.find_one({"_id": oid})
+        if not existing:
+            return {"status": "error", "message": "Tournament not found."}
+
+        # Delete the tournament
+        db_main.tournaments.delete_one({"_id": oid})
+
+        # Delete all registrations referencing this tournament
+        delete_regs = db_main.registrations.delete_many({"tournament_id": oid})
+        print(f"[KheloMore] Deleted tournament '{existing.get('title')}' and cleared {delete_regs.deleted_count} registrations.")
+
+        return {"status": "success", "message": "Tournament and associated registrations deleted successfully."}
+
+    except Exception as e:
+        print(f"[KheloMore] Failed to delete tournament: {e}")
+        print(traceback.format_exc())
+        return {"status": "error", "message": f"Failed to delete tournament: {e}"}
+
+
+def get_tournament_registrations_handler(tournament_id):
+    """
+    Fetches all registrations for a given tournament (admin view).
+    Joins user email to profile name via the users collection.
+    Attaches entry_fee and mode from the parent tournament document.
+    """
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}, 500
+
+    try:
+        oid = safe_object_id(tournament_id)
+        tournament = db_main.tournaments.find_one({"_id": oid})
+        if not tournament:
+            return {"status": "error", "message": "Tournament not found."}, 404
+
+        entry_fee = tournament.get("entry_fee") or 0
+        entry_type = tournament.get("entry", "Free Entry")
+        mode = tournament.get("mode", "Squad")
+        is_paid = entry_type == "Paid Entry" and int(entry_fee) > 0
+
+        # Fetch all registrations for this tournament
+        regs_list = list(db_main.registrations.find({"tournament_id": oid}).sort("registered_at", 1))
+
+        results = []
+        for reg in regs_list:
+            user_email = reg.get("user_email", "")
+            gamer_ids = reg.get("gamer_ids", [])
+            registered_at = reg.get("registered_at")
+
+            # Try to look up display name from users collection
+            display_name = user_email
+            if user_email:
+                user_doc = db_main.users.find_one({"email": user_email})
+                if user_doc:
+                    display_name = (
+                        user_doc.get("full_name")
+                        or user_doc.get("gamertag")
+                        or user_doc.get("name")
+                        or user_email
+                    )
+
+            results.append({
+                "id": str(reg.get("_id", "")),
+                "user_email": user_email,
+                "display_name": display_name,
+                "gamer_ids": gamer_ids,
+                "registered_at": (registered_at.isoformat() + "Z") if registered_at else None,
+                "amount_paid": int(entry_fee) if is_paid else 0,
+                "is_paid": is_paid,
+                "mode": mode,
+            })
+
+        return {
+            "status": "success",
+            "tournament_title": tournament.get("title", ""),
+            "mode": mode,
+            "entry_type": entry_type,
+            "entry_fee": int(entry_fee) if entry_fee else 0,
+            "registrations": results,
+            "total": len(results),
+        }, 200
+
+    except Exception as e:
+        print(f"[KheloMore] Failed to fetch tournament registrations: {e}")
+        print(traceback.format_exc())
+        return {"status": "error", "message": f"Failed to fetch registrations: {e}"}, 500

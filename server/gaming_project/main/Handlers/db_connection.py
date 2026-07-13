@@ -19,6 +19,11 @@ _client = None
 def get_db():
     global _client
     if _client is None:
+        if not MONGO_URL:
+            # Fail loud: pymongo.MongoClient(None) silently falls back to localhost, which
+            # would connect to (or spin up expectations of) the wrong database undetected.
+            print("[KheloMore] MONGO_URL environment variable is not set.")
+            return None
         try:
             _client = pymongo.MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
             # Ping database to force connection check

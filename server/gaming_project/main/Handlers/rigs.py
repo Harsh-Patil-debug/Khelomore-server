@@ -17,11 +17,26 @@ SEED_RIG_TEMPLATES = [
     {"type": "PS5", "name": "PS5 #02", "spec": "DualSense Edge · 4K"},
 ]
 
-def map_rig_doc(doc):
+def map_rig_doc(doc, cafe_prices=None):
     """Maps a MongoDB rig document to the format expected by the frontend."""
     raw_name = doc.get("name", "")
     number_fallback = raw_name.split("#")[-1].strip() if "#" in raw_name else raw_name
     raw_type = doc.get("type", "PC").lower()
+
+    # Dynamic lookup of cafe price to ensure it is applied to every system
+    cafe_id_str = str(doc.get("cafe_id"))
+    cafe_price = None
+    if cafe_prices and cafe_id_str in cafe_prices:
+        cafe_price = cafe_prices[cafe_id_str]
+    else:
+        db_main = get_db()
+        if db_main is not None and doc.get("cafe_id"):
+            try:
+                cafe = db_main.cafes.find_one({"_id": ObjectId(doc.get("cafe_id"))}, {"price_per_hour": 1})
+                if cafe:
+                    cafe_price = cafe.get("price_per_hour")
+            except Exception:
+                pass
 
     return {
         "id": str(doc["_id"]),
@@ -33,7 +48,7 @@ def map_rig_doc(doc):
         "specs": doc.get("spec") or doc.get("specs") or "",
         "status": doc.get("status", "available"),
         "zone": doc.get("zone", "Standard"),
-        "hourly_price": doc.get("hourly_price", 100),
+        "hourly_price": doc.get("hourly_price") if doc.get("hourly_price") is not None else (cafe_price if cafe_price is not None else 150),
     }
 
 def get_rigs_handler(cafe_id=None):
@@ -45,22 +60,25 @@ def get_rigs_handler(cafe_id=None):
     try:
         # Auto-seed per cafe if cafe_id is provided and that cafe has 0 rigs
         if cafe_id and db_main.rigs.count_documents({"cafe_id": cafe_id}) == 0:
+            cafe_doc = db_main.cafes.find_one({"_id": ObjectId(cafe_id)})
+            cafe_price = cafe_doc.get("price_per_hour") if cafe_doc else None
+            
             rigs_to_insert = []
             for template in SEED_RIG_TEMPLATES:
                 name = template["name"]
                 number = name.split("#")[-1].strip() if "#" in name else name
                 spec = template["spec"]
                 
-                # Determine zone and price based on type/spec
+                # Determine zone based on type/spec
                 if template["type"] == "PS5":
                     zone = "Console Lounge"
-                    price = 160
+                    price = cafe_price if cafe_price is not None else 160
                 elif "RTX 4090" in spec:
                     zone = "VIP Elite Zone"
-                    price = 200
+                    price = cafe_price if cafe_price is not None else 200
                 else:
                     zone = "Regular Zone"
-                    price = 150
+                    price = cafe_price if cafe_price is not None else 150
                 
                 rigs_to_insert.append({
                     "cafe_id": cafe_id,
@@ -78,7 +96,7 @@ def get_rigs_handler(cafe_id=None):
         
         # General fallback: if collection is completely empty, seed for all cafes
         elif db_main.rigs.count_documents({}) == 0:
-            cafes = list(db_main.cafes.find({}))
+            cafes = list(db_main.cafes.find({"is_deleted": {"$ne": True}}))
             seeded_count = 0
             if cafes:
                 rigs_to_insert = []
@@ -120,7 +138,78 @@ def get_rigs_handler(cafe_id=None):
             query["cafe_id"] = cafe_id
 
         docs = list(db_main.rigs.find(query))
-        mapped = [map_rig_doc(d) for d in docs]
+        
+        # Calculate dynamic status based on active/upcoming bookings
+        if docs:
+            from datetime import datetime
+            from .bookings_handler import parse_slot_times, IST, calculate_booking_status_and_time
+            now = datetime.now(IST)
+            today_str = now.strftime("%Y-%m-%d")
+            
+            cafe_ids = list(set(d.get("cafe_id") for d in docs if d.get("cafe_id")))
+            bookings = list(db_main.bookings.find({
+                "cafe_id": {"$in": cafe_ids},
+                "status": {"$in": ["Active", "Upcoming"]}
+            }))
+            
+            bookings_by_rig = {}
+            for b in bookings:
+                # First run auto-expiration check on bookings in the database
+                b_status = b.get("status")
+                slots = b.get("slots", [])
+                date_str = b.get("date")
+                
+                should_expire = False
+                if date_str:
+                    try:
+                        computed_status, _ = calculate_booking_status_and_time(date_str, slots or [], b_status)
+                        if computed_status == "Completed":
+                            should_expire = True
+                    except Exception:
+                        pass
+                
+                if should_expire:
+                    db_main.bookings.update_one({"_id": b["_id"]}, {"$set": {"status": "Completed"}})
+                    b["status"] = "Completed"
+                    # Exclude from active listings
+                    continue
+
+                rig_name = b.get("rig", "").replace("•", "·").split("·")[0].strip()
+                bookings_by_rig.setdefault(rig_name, []).append(b)
+                
+            for d in docs:
+                if d.get("status") == "maintenance":
+                    continue
+                    
+                rig_name = d.get("name", "").replace("•", "·").split("·")[0].strip()
+                rig_bookings = bookings_by_rig.get(rig_name, [])
+                
+                new_status = "available"
+                for b in rig_bookings:
+                    b_status = b.get("status")
+                    slots = b.get("slots", [])
+                    try:
+                        earliest_start, latest_end = parse_slot_times(b.get("date"), slots)
+                        is_active_time = (b.get("date") == today_str and earliest_start <= now <= latest_end)
+                        
+                        if b_status == "Active":
+                            new_status = "occupied"
+                            break
+                        elif b_status == "Upcoming" and is_active_time:
+                            new_status = "reserved"
+                    except Exception:
+                        pass
+                        
+                if d.get("status") != new_status:
+                    db_main.rigs.update_one({"_id": d["_id"]}, {"$set": {"status": new_status}})
+                    d["status"] = new_status
+
+        # Batch fetch cafe prices to avoid N+1 queries
+        cafe_ids_to_query = list(set(ObjectId(d.get("cafe_id")) for d in docs if d.get("cafe_id") and ObjectId.is_valid(d.get("cafe_id"))))
+        cafes_docs = list(db_main.cafes.find({"_id": {"$in": cafe_ids_to_query}}, {"_id": 1, "price_per_hour": 1}))
+        cafe_prices = {str(c["_id"]): c.get("price_per_hour") for c in cafes_docs}
+
+        mapped = [map_rig_doc(d, cafe_prices=cafe_prices) for d in docs]
         return {"status": "success", "rigs": mapped}
     except Exception as e:
         return {"status": "error", "message": f"Failed to retrieve rigs: {e}"}
@@ -163,6 +252,7 @@ def create_rig_handler(data):
             "name": name,
             "number": number,
             "spec": spec,
+            "specs": spec,
             "status": status,
             "zone": zone,
             "hourly_price": hourly_price
@@ -234,7 +324,9 @@ def update_rig_handler(rig_id, data):
                 update_fields["name"] = current_name
                 update_fields["number"] = ""
         if "spec" in data or "specs" in data:
-            update_fields["spec"] = data.get("spec") or data.get("specs")
+            val = data.get("spec") or data.get("specs")
+            update_fields["spec"] = val
+            update_fields["specs"] = val
         if "status" in data:
             update_fields["status"] = data["status"]
         if "zone" in data:
@@ -286,6 +378,7 @@ def delete_rig_handler(rig_id):
 def reserve_rig_slots_handler(rig_id, data):
     """Creates an admin booking/reservation for a specific rig and list of slots."""
     import random
+    from datetime import datetime
     from .bookings_handler import calculate_booking_status_and_time, IST
     
     db_main = get_db()
