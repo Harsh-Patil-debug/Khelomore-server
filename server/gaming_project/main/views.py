@@ -1151,8 +1151,10 @@ class PartnerApplicationListCreateView(APIView):
     POST /partner-applications/ — Submit a new application (Public)
     GET /partner-applications/ — List applications (Super Admin Only)
     """
+    parser_classes = (MultiPartParser, FormParser)
+
     def post(self, request):
-        result, status_code = partner_applications.create_partner_application_handler(request.data)
+        result, status_code = partner_applications.create_partner_application_handler(request.data, request.FILES)
         return Response(result, status=status_code)
 
     def get(self, request):
