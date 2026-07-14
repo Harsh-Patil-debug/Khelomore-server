@@ -288,7 +288,7 @@ class KheloMoreResendOTPView(APIView):
         is_admin = check_is_admin(request)
         coll = auth_handler.get_user_collection(is_admin, role)
 
-        if is_admin and role != "super_admin":
+        if (is_admin or role == "admin") and role != "super_admin":
             cafe_exists = db_main.cafes.find_one({"owner_email": dec_email, "is_deleted": {"$ne": True}})
             if not cafe_exists:
                 return Response({"error": "This account is not associated with any registered gaming cafe. Access denied."}, status=403)
@@ -1071,13 +1071,27 @@ class KheloMoreMeView(APIView):
             return error_response
 
         from .Handlers.db_connection import db_main
-        # Look up user in website_users first
-        user = db_main.website_users.find_one({"email": email})
-        role = "website_user"
-        if not user:
-            # Try normal app users
-            user = db_main.users.find_one({"email": email})
-            role = "user"
+        # The JWT payload itself only carries an email, not which account/collection it
+        # belongs to — and the SAME email can legitimately exist in more than one
+        # collection (e.g. someone who both plays via the mobile app AND owns a cafe).
+        # Whichever cookie actually carried this request is an unambiguous signal of which
+        # account the frontend making the request means; only fall back to guessing a
+        # fixed order when authenticating via a bare Authorization header, which carries
+        # no such hint.
+        if request.COOKIES.get('km_admin_token'):
+            lookup_order = [(db_main.admins, "admin"), (db_main.website_users, "website_user"), (db_main.users, "user")]
+        elif request.COOKIES.get('km_gamer_token'):
+            lookup_order = [(db_main.users, "user"), (db_main.website_users, "website_user"), (db_main.admins, "admin")]
+        else:
+            lookup_order = [(db_main.website_users, "website_user"), (db_main.users, "user"), (db_main.admins, "admin")]
+
+        user = None
+        role = None
+        for coll, coll_role in lookup_order:
+            user = coll.find_one({"email": email})
+            if user:
+                role = coll_role
+                break
 
         if not user:
             return Response({"error": "User profile not found"}, status=status.HTTP_404_NOT_FOUND)

@@ -212,6 +212,8 @@ def get_user_collection(is_admin=False, role=""):
         return db_main.super_admin
     if role == "website_user":
         return db_main.website_users
+    if role == "admin":
+        return db_main.admins
     return db_main.admins if is_admin else db_main.users
 
 def khelomore_register(gamertag, email, password, iv, phone=None, is_admin=False, role=""):
@@ -225,7 +227,7 @@ def khelomore_register(gamertag, email, password, iv, phone=None, is_admin=False
         return {"error": f"Decryption failed: {str(e)}"}, 400
 
     coll = get_user_collection(is_admin, role)
-    if is_admin and role != "super_admin":
+    if (is_admin or role == "admin") and role != "super_admin":
         cafe_exists = db_main.cafes.find_one({"owner_email": dec_email, "is_deleted": {"$ne": True}})
         if not cafe_exists:
             return {"error": "This email is not authorized. Please contact the platform Super Admin to list your cafe first."}, 403
@@ -272,7 +274,7 @@ def khelomore_login(email, password, iv, is_admin=False, role=""):
     if not user:
         return {"error": "Invalid email or password."}, 401
 
-    if is_admin and role != "super_admin":
+    if (is_admin or role == "admin") and role != "super_admin":
         cafe_exists = db_main.cafes.find_one({"owner_email": dec_email, "is_deleted": {"$ne": True}})
         if not cafe_exists:
             return {"error": "This account is not associated with any registered gaming cafe. Access denied."}, 403
@@ -309,7 +311,7 @@ def khelomore_verify_otp(email, otp_code, iv, is_admin=False, role=""):
         return {"error": f"Decryption failed: {str(e)}"}, 400
 
     coll = get_user_collection(is_admin, role)
-    if is_admin and role != "super_admin":
+    if (is_admin or role == "admin") and role != "super_admin":
         cafe_exists = db_main.cafes.find_one({"owner_email": dec_email, "is_deleted": {"$ne": True}})
         if not cafe_exists:
             return {"error": "This account is not associated with any active gaming cafe. Access denied."}, 403
