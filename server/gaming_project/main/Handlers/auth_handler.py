@@ -175,7 +175,13 @@ def verify_token(token: str) -> str:
     """Verifies JWT and returns the user's email if valid, otherwise raises exception."""
     payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     jti = payload.get('jti')
-    if jti and db_main.revoked_tokens.find_one({"jti": jti}):
+    # SECURITY: every token generate_token() issues includes a jti, used to check
+    # revocation on logout. A token with no jti predates that (or was crafted some other
+    # way) and can never be revoked — silently trusting it forever defeats the whole
+    # point of server-side logout, so treat "no jti" as invalid rather than unrevocable.
+    if not jti:
+        raise jwt.InvalidTokenError("Token missing jti claim.")
+    if db_main.revoked_tokens.find_one({"jti": jti}):
         raise jwt.InvalidTokenError("Token has been revoked.")
     return payload['email']
 def generate_totp_uri(email: str, secret: str) -> str:
