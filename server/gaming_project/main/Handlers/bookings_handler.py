@@ -114,6 +114,14 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
     booking is created and marked paid.
     """
     try:
+        # SECURITY: cafe_id/date come straight from the JSON request body and flow directly
+        # into MongoDB query filters below — a client sending a dict here (e.g. {"$ne": "x"})
+        # instead of a plain string would corrupt the availability/conflict queries against
+        # ALL cafes/dates rather than the intended one. Coerce to str at the boundary rather
+        # than trusting the caller's type.
+        cafe_id = str(cafe_id) if cafe_id is not None else cafe_id
+        date = str(date) if date is not None else date
+
         if not user_name:
             user_doc = db_main.users.find_one({"email": user_email})
             if user_doc:

@@ -65,6 +65,11 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'anon': '2000/minute',   # Increased from 60 for development
         'user': '10000/minute',  # Increased from 300 for development
+        # Deliberately much tighter than the defaults above — applied via ScopedRateThrottle
+        # to login/register/verify-otp/resend-otp specifically. Those endpoints are the
+        # credential-guessing attack surface; the loose defaults exist for general API
+        # traffic (dashboards polling, image-heavy list views), not this.
+        'auth': '20/minute',
     }
 }
 

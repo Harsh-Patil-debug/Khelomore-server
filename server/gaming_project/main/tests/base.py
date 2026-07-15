@@ -16,6 +16,7 @@ from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 from Crypto.Util.Padding import pad
 from django.conf import settings
+from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.test import APIClient
 
@@ -37,6 +38,11 @@ class SecurityTestCase(TestCase):
     def setUp(self):
         self.client = APIClient()
         self._created = []
+        # DRF's throttle state lives in Django's cache, which is process-wide and NOT reset
+        # between test methods by TestCase's transaction rollback — without this, tests that
+        # hit a rate-limited auth endpoint several times (e.g. a lockout test) would leak
+        # throttle state into whichever test runs next and make results order-dependent.
+        cache.clear()
 
     def tearDown(self):
         for collection_name, doc_id in self._created:
@@ -64,8 +70,10 @@ class SecurityTestCase(TestCase):
             results.append(base64.b64encode(enc).decode('utf-8'))
         return (*results, iv_b64)
 
-    def make_active_user(self, email=None, role="", collection="users"):
-        """Directly inserts an Active user/admin/super_admin doc, bypassing OTP."""
+    def make_active_user(self, email=None, role="", collection="users", password=None):
+        """Directly inserts an Active user/admin/super_admin doc, bypassing OTP.
+        Pass password= to also set a real Argon2id hash, for testing /auth/login/ itself
+        (bypassing OTP alone, via generate_token(), doesn't exercise password verification)."""
         email = email or self.unique_email(role or "user")
         coll = self.db[collection]
         doc = {
@@ -76,6 +84,8 @@ class SecurityTestCase(TestCase):
             "xp": 0,
             "rank": "Recruit PRO I",
         }
+        if password:
+            doc["password_hash"] = auth_handler.ph.hash(password)
         result = coll.insert_one(doc)
         self.track(collection, result.inserted_id)
         token = auth_handler.generate_token(email)

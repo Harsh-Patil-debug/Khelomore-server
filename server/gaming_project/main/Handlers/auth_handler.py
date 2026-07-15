@@ -60,6 +60,9 @@ ENCRYPTION_KEY        = base64.b64decode(os.getenv("ENCRYPTION_KEY", ""))
 IV                    = base64.b64decode(os.getenv("IV", ""))
 IST = timezone(timedelta(hours=5, minutes=30))
 MAX_OTP_ATTEMPTS = int(os.getenv("MAX_OTP_ATTEMPTS", "5"))
+MAX_LOGIN_ATTEMPTS = int(os.getenv("MAX_LOGIN_ATTEMPTS", "5"))
+LOGIN_LOCKOUT_MINUTES = int(os.getenv("LOGIN_LOCKOUT_MINUTES", "15"))
+OTP_RESEND_COOLDOWN_SECONDS = int(os.getenv("OTP_RESEND_COOLDOWN_SECONDS", "45"))
 
 ph = PasswordHasher(
     time_cost=5,      # Number of iterations
@@ -281,10 +284,30 @@ def khelomore_login(email, password, iv, is_admin=False, role=""):
 
     if user.get("status") == "Blocked":
         return {"error": "This account has been blocked."}, 403
+
+    # SECURITY: bound password-guessing against a known email. Without this, an attacker
+    # could try unlimited passwords for one account — the only thing stopping them
+    # otherwise is the generic per-IP request throttle, which is far too loose in practice
+    # to prevent this on its own.
+    locked_until = user.get("login_locked_until")
+    if locked_until:
+        if locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=timezone.utc).astimezone(IST)
+        if datetime.now(IST) < locked_until:
+            return {"error": "Too many failed login attempts. Please try again later."}, 429
+
     if not user.get("password_hash"):
         return {"error": "This account uses Google Sign-In."}, 400
     if not verify_password(user["password_hash"], dec_password):
+        attempts = int(user.get("login_attempts", 0)) + 1
+        update_fields: dict = {"login_attempts": attempts}
+        if attempts >= MAX_LOGIN_ATTEMPTS:
+            update_fields["login_locked_until"] = datetime.now(IST) + timedelta(minutes=LOGIN_LOCKOUT_MINUTES)
+        coll.update_one({"_id": user["_id"]}, {"$set": update_fields})
         return {"error": "Invalid email or password."}, 401
+
+    if user.get("login_attempts") or user.get("login_locked_until"):
+        coll.update_one({"_id": user["_id"]}, {"$unset": {"login_attempts": "", "login_locked_until": ""}})
 
     otp_code   = str(random.randint(100000, 999999))
     otp_expiry = datetime.now(IST) + timedelta(minutes=10)

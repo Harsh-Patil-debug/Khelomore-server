@@ -182,6 +182,115 @@ class OtpLockoutTests(SecurityTestCase):
         self.assertEqual(code, 200)
 
 
+class LoginBruteForceTests(SecurityTestCase):
+    """Guards against unlimited password guesses against a known email on /auth/login/."""
+
+    def _login(self, email, password):
+        email_enc, password_enc, iv = self.encrypt_with_shared_iv(email, password)
+        return auth_handler.khelomore_login(email_enc, password_enc, iv, role="user")
+
+    def test_wrong_password_is_rejected(self):
+        email = self.unique_email("brute")
+        self.make_active_user(email=email, password="CorrectHorseBattery1")
+        result, code = self._login(email, "wrong-password")
+        self.assertEqual(code, 401)
+
+    def test_correct_password_is_accepted(self):
+        email = self.unique_email("brute")
+        self.make_active_user(email=email, password="CorrectHorseBattery1")
+        result, code = self._login(email, "CorrectHorseBattery1")
+        self.assertEqual(code, 200)
+
+    def test_lockout_after_max_attempts_then_correct_password_no_longer_works(self):
+        email = self.unique_email("brute")
+        self.make_active_user(email=email, password="CorrectHorseBattery1")
+
+        for _ in range(auth_handler.MAX_LOGIN_ATTEMPTS):
+            result, code = self._login(email, "wrong-password")
+
+        # The account is now locked — even the genuinely correct password must be rejected
+        # until the lockout window passes, otherwise the lockout is pointless.
+        result, code = self._login(email, "CorrectHorseBattery1")
+        self.assertEqual(code, 429)
+        self.assertIn("Too many failed login attempts", result["error"])
+
+    def test_successful_login_resets_the_attempt_counter(self):
+        email = self.unique_email("brute")
+        self.make_active_user(email=email, password="CorrectHorseBattery1")
+
+        for _ in range(auth_handler.MAX_LOGIN_ATTEMPTS - 1):
+            self._login(email, "wrong-password")
+
+        # One below the lockout threshold — a correct login here must succeed and clear
+        # the counter, not carry it forward into a future lockout.
+        result, code = self._login(email, "CorrectHorseBattery1")
+        self.assertEqual(code, 200)
+
+        user = self.db.users.find_one({"email": email})
+        self.assertNotIn("login_attempts", user)
+        self.assertNotIn("login_locked_until", user)
+
+
+class OtpResendCooldownTests(SecurityTestCase):
+    """Guards against /auth/resend-otp/ being used to dodge the OTP attempt lockout by
+    just requesting a fresh code (and resetting otp_attempts) before hitting the cap."""
+
+    def test_immediate_resend_is_rejected(self):
+        email = self.unique_email("resend")
+        self.make_active_user(email=email, password="CorrectHorseBattery1")
+        # First login triggers the initial OTP send (sets otp_expiry).
+        email_enc, password_enc, iv = self.encrypt_with_shared_iv(email, "CorrectHorseBattery1")
+        auth_handler.khelomore_login(email_enc, password_enc, iv, role="user")
+
+        import base64
+        from Crypto.Cipher import AES
+        from Crypto.Random import get_random_bytes
+        from Crypto.Util.Padding import pad
+        iv_bytes = get_random_bytes(16)
+        cipher = AES.new(auth_handler.ENCRYPTION_KEY, AES.MODE_CBC, iv_bytes)
+        enc = cipher.encrypt(pad(email.encode("utf-8"), AES.block_size))
+        email_enc2 = base64.b64encode(enc).decode("utf-8")
+        iv_b64 = base64.b64encode(iv_bytes).decode("utf-8")
+
+        resp = self.client.post(
+            "/api/v1/main/auth/resend-otp/",
+            {"email": email_enc2, "iv": iv_b64, "role": "user"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 429)
+        self.assertIn("wait", resp.json().get("error", "").lower())
+
+    def test_resend_after_cooldown_window_succeeds(self):
+        from datetime import datetime, timedelta
+        email = self.unique_email("resend")
+        self.make_active_user(email=email, password="CorrectHorseBattery1")
+        # Directly seed an otp_expiry old enough that the cooldown has already elapsed —
+        # equivalent to a real OTP sent more than the cooldown window ago.
+        self.db.users.update_one(
+            {"email": email},
+            {"$set": {"otp_expiry": datetime.now(auth_handler.IST) + timedelta(
+                minutes=10, seconds=-(auth_handler.OTP_RESEND_COOLDOWN_SECONDS + 5)
+            )}},
+        )
+
+        import base64
+        from Crypto.Cipher import AES
+        from Crypto.Random import get_random_bytes
+        from Crypto.Util.Padding import pad
+        iv_bytes = get_random_bytes(16)
+        cipher = AES.new(auth_handler.ENCRYPTION_KEY, AES.MODE_CBC, iv_bytes)
+        enc = cipher.encrypt(pad(email.encode("utf-8"), AES.block_size))
+        email_enc = base64.b64encode(enc).decode("utf-8")
+        iv_b64 = base64.b64encode(iv_bytes).decode("utf-8")
+
+        resp = self.client.post(
+            "/api/v1/main/auth/resend-otp/",
+            {"email": email_enc, "iv": iv_b64, "role": "user"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+
+
 class JwtRevocationTests(SecurityTestCase):
     """Guards against a logged-out token remaining usable until natural expiry."""
 

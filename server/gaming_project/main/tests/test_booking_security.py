@@ -121,6 +121,40 @@ class BookingListOwnershipTests(SecurityTestCase):
         self.assertEqual(resp.status_code, 200)
 
 
+class BookingNoSqlInjectionTests(SecurityTestCase):
+    """Guards against cafe_id/date being interpreted as a MongoDB query operator instead of
+    a literal value — create_booking_handler passes them straight into query filters."""
+
+    def test_dollar_ne_cafe_id_does_not_leak_conflicts_from_an_unrelated_cafe(self):
+        # Cafe A has a real, existing booking for PC #01 at a specific slot.
+        cafe_a = self.make_cafe(owner_email="cafe-owner-injA@khelomore.invalid", price_per_hour=100)
+        self.make_booking(user_email="other-user@khelomore.invalid", cafe_id=cafe_a)
+
+        # The attacker's own cafe (unrelated to cafe A) has no bookings at all.
+        customer_email, customer_token = self.make_active_user()
+
+        # If cafe_id were passed unsanitized into the Mongo filter, {"$ne": "<bogus>"} would
+        # match every booking in the collection (including cafe A's), falsely reporting a
+        # conflict for cafe B — which has nothing booked at all — for the identical rig/slot.
+        resp = self.client.post(
+            "/api/v1/main/bookings/",
+            {
+                "cafe_id": {"$ne": "000000000000000000000000"},
+                "cafe_name": "Sectest Cafe",
+                "zone": "Regular Zone",
+                "date": "2099-01-01",
+                "slots": ["10:00 AM - 11:00 AM"],
+                "rig": "PC #01",
+            },
+            format="json",
+            **self.auth_header(customer_token),
+        )
+        # Coerced to a literal string, it can't match cafe A's real booking, so this must
+        # NOT be the cross-cafe "Conflict detected" error the injection would otherwise cause.
+        if resp.status_code == 400:
+            self.assertNotIn("Conflict detected", resp.json().get("message", ""))
+
+
 class BookingPaymentIntegrityTests(SecurityTestCase):
     """Guards against client-controlled price/payment_status bypassing real payment."""
 

@@ -11,6 +11,7 @@ from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.throttling import ScopedRateThrottle
 from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, auth_handler, bookings_handler, auth_middleware, favorites, sessions, offers, users, partner_applications
 
 
@@ -154,6 +155,12 @@ class KheloMoreRegisterView(APIView):
     Body: { gamertag, email, password, iv, phone, role }  — all AES-CBC encrypted (except role)
     Returns: encrypted { message, email }   — OTP sent, JWT NOT yet issued
     """
+    # SECURITY: the generic per-IP throttle (see settings.DEFAULT_THROTTLE_RATES) is loose
+    # enough to be meaningless for a credential-guessing endpoint — replace it with a tight,
+    # scoped rate specific to auth endpoints.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
     def post(self, request):
         data = request.data
         role = data.get("role", "")
@@ -178,6 +185,9 @@ class KheloMoreLoginView(APIView):
     Body: { email, password, iv, role }           — AES-CBC encrypted (except role)
     Returns: encrypted { message, email }   — OTP sent, JWT NOT yet issued
     """
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
     def post(self, request):
         data = request.data
         role = data.get("role", "")
@@ -201,6 +211,9 @@ class KheloMoreVerifyOTPView(APIView):
     Body: { email, otp_code, iv, role }           — AES-CBC encrypted (except role)
     Returns: encrypted { token, user }      — JWT issued on success
     """
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
     def post(self, request):
         data = request.data
         role = data.get("role", "")
@@ -268,6 +281,9 @@ class KheloMoreResendOTPView(APIView):
     Body: { email, iv, role }
     Re-generates and resends OTP. Returns encrypted success message.
     """
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
     def post(self, request):
         data     = request.data
         iv       = data.get("iv", "")
@@ -283,7 +299,7 @@ class KheloMoreResendOTPView(APIView):
         from .Handlers.db_connection import db_main
         from .Handlers.email_handler import send_otp_email
         import random
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
         is_admin = check_is_admin(request)
         coll = auth_handler.get_user_collection(is_admin, role)
@@ -296,6 +312,22 @@ class KheloMoreResendOTPView(APIView):
         user = coll.find_one({"email": dec_email})
         if not user:
             return Response({"error": "No account found for this email."}, status=404)
+
+        # SECURITY: resending unconditionally clears otp_attempts (below), which otherwise
+        # exists specifically to bound OTP-guessing. Without a cooldown, an attacker could
+        # dodge that lockout forever by resending just before hitting the attempt cap. A
+        # fresh code each time still bounds the practical impact (they can't accumulate
+        # guesses against one fixed code), but this closes the gap outright rather than
+        # relying on that as the only defense.
+        prev_expiry = user.get("otp_expiry")
+        if prev_expiry:
+            if prev_expiry.tzinfo is None:
+                prev_expiry = prev_expiry.replace(tzinfo=timezone.utc).astimezone(auth_handler.IST)
+            last_sent = prev_expiry - timedelta(minutes=10)
+            elapsed = (datetime.now(auth_handler.IST) - last_sent).total_seconds()
+            if elapsed < auth_handler.OTP_RESEND_COOLDOWN_SECONDS:
+                wait_for = int(auth_handler.OTP_RESEND_COOLDOWN_SECONDS - elapsed)
+                return Response({"error": f"Please wait {wait_for}s before requesting another code."}, status=429)
 
         otp_code   = str(random.randint(100000, 999999))
         otp_expiry = datetime.now(auth_handler.IST) + timedelta(minutes=10)
@@ -905,7 +937,12 @@ class SessionListCreateView(APIView):
         from .Handlers.db_connection import get_db
         from bson import ObjectId
         db = get_db()
-        rig = db.rigs.find_one({"_id": ObjectId(system_id)})
+        if db is None:
+            return Response({"status": "error", "message": "MongoDB connection is not established."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        try:
+            rig = db.rigs.find_one({"_id": ObjectId(system_id)})
+        except Exception:
+            return Response({"status": "error", "message": "Invalid 'system_id' parameter"}, status=status.HTTP_400_BAD_REQUEST)
         if not rig:
             return Response({"status": "error", "message": "Rig not found"}, status=status.HTTP_404_NOT_FOUND)
         
