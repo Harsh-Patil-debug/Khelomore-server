@@ -8,9 +8,14 @@ from bson import ObjectId
 from .db_connection import get_db
 from .auth_handler import encrypt_phone_field, decrypt_phone_field
 from .upload_validation import validate_image_upload
+from . import input_validation
 
 # Optional fields: stored if provided, never required.
 _OPTIONAL_FIELDS = ["ps5Count", "otherDevices", "openingHours", "website", "instagram", "mapsLink", "message"]
+
+# Public, unauthenticated form — cap how many photos a single submission can attach so this
+# endpoint can't be used to force unbounded Cloudinary uploads.
+_MAX_PHOTOS = 10
 
 
 def get_partner_applications_handler():
@@ -70,6 +75,46 @@ def create_partner_application_handler(data, files=None):
         if not cafe_name or not owner_name or not phone or not email or not city or not state or not address or not pc_count:
             return {"status": "error", "message": "All fields are required."}, 400
 
+        # SECURITY: this is the only fully public, unauthenticated form-submission endpoint
+        # in the whole platform — every field below only ever had a client-side check
+        # (maxLength/type=email/type=url/min/max), which a direct POST bypasses entirely.
+        validation_error = (
+            input_validation.validate_text(cafe_name, "Cafe name", max_len=100)
+            or input_validation.validate_text(owner_name, "Owner name", max_len=80)
+            or input_validation.validate_phone(phone)
+            or input_validation.validate_email(email)
+            or input_validation.validate_text(city, "City", max_len=60)
+            or input_validation.validate_text(state, "State", max_len=60)
+            or input_validation.validate_text(address, "Address", max_len=400)
+        )
+        if validation_error:
+            return {"status": "error", "message": validation_error}, 400
+
+        pc_count, pc_count_error = input_validation.parse_bounded_number(pc_count, "PC count", min_val=1, max_val=999)
+        if pc_count_error:
+            return {"status": "error", "message": pc_count_error}, 400
+
+        ps5_count = data.get("ps5Count")
+        if ps5_count:
+            _, err = input_validation.parse_bounded_number(ps5_count, "PS5 count", min_val=0, max_val=999)
+            if err:
+                return {"status": "error", "message": err}, 400
+
+        for field in ("website", "mapsLink"):
+            value = data.get(field)
+            if value:
+                err = input_validation.validate_url(value, field)
+                if err:
+                    return {"status": "error", "message": err}, 400
+
+        optional_text_limits = {"otherDevices": 200, "openingHours": 80, "instagram": 80, "message": 800}
+        for field, max_len in optional_text_limits.items():
+            value = data.get(field)
+            if value:
+                err = input_validation.validate_text(value, field, max_len=max_len, required=False)
+                if err:
+                    return {"status": "error", "message": err}, 400
+
         doc = {
             "cafeName": cafe_name,
             "ownerName": owner_name,
@@ -91,6 +136,7 @@ def create_partner_application_handler(data, files=None):
         logo_url = ""
         if files:
             photo_files = files.getlist("photos") if hasattr(files, "getlist") else ([files["photos"]] if "photos" in files else [])
+            photo_files = photo_files[:_MAX_PHOTOS]
             for photo_file in photo_files:
                 validation_error = validate_image_upload(photo_file)
                 if validation_error:
@@ -138,6 +184,9 @@ def update_partner_application_status_handler(app_id, status_val):
         oid = ObjectId(app_id)
     except Exception:
         return {"status": "error", "message": "Invalid application ID format."}, 400
+    enum_error = input_validation.validate_enum(status_val, {"pending", "approved", "rejected"}, "Status")
+    if enum_error:
+        return {"status": "error", "message": enum_error}, 400
     try:
         res = db_main.partner_applications.update_one({"_id": oid}, {"$set": {"status": status_val}})
         if res.matched_count == 0:

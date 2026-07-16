@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad, pad
 from .db_connection import db_main
+from . import input_validation
 from dotenv import load_dotenv
 import random
 from .email_handler import send_admin_otp_email, send_sms_otp, send_welcome_email
@@ -228,6 +229,18 @@ def khelomore_register(gamertag, email, password, iv, phone=None, is_admin=False
         dec_phone    = decrypt_data(phone, iv).strip() if phone else ""
     except Exception as e:
         return {"error": f"Decryption failed: {str(e)}"}, 400
+
+    # SECURITY: every one of these checks already exists as a client-side HTML attribute
+    # somewhere in the four frontends — but client-side validation is bypassable by anyone
+    # calling this endpoint directly. These are the real, unbypassable checks.
+    error = (
+        input_validation.validate_text(dec_gamertag, "Gamertag", max_len=40)
+        or input_validation.validate_email(dec_email)
+        or input_validation.validate_password_strength(dec_password)
+        or input_validation.validate_phone(dec_phone, required=False)
+    )
+    if error:
+        return {"error": error}, 400
 
     coll = get_user_collection(is_admin, role)
     if (is_admin or role == "admin") and role != "super_admin":
@@ -579,8 +592,9 @@ def khelomore_update_phone(email, phone_encrypted, iv):
     except Exception as e:
         return {"error": f"Decryption failed: {str(e)}"}, 400
 
-    if not dec_phone:
-        return {"error": "Phone number is required."}, 400
+    error = input_validation.validate_phone(dec_phone, required=True)
+    if error:
+        return {"error": error}, 400
 
     coll = db_main.website_users
     user = coll.find_one({"email": email})

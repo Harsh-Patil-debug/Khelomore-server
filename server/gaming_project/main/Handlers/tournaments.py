@@ -10,6 +10,7 @@ import cloudinary.uploader
 from bson import ObjectId
 from .db_connection import get_db
 from .upload_validation import validate_image_upload
+from . import input_validation
 
 # Configure Cloudinary
 cloudinary_secret = os.getenv("CLOUDINARY_API_SECRET")
@@ -279,16 +280,24 @@ def create_tournament_handler(data, files=None):
                 "message": "Game, Title, Prize Pool, Starts At, and Capacity are required fields."
             }
 
-        try:
-            capacity = int(capacity)
-        except (ValueError, TypeError):
-            return {"status": "error", "message": "Capacity must be an integer."}
+        validation_error = (
+            input_validation.validate_text(game, "Game", max_len=60)
+            or input_validation.validate_text(title, "Title", max_len=150)
+            or input_validation.validate_text(prize, "Prize Pool", max_len=100)
+        )
+        if validation_error:
+            return {"status": "error", "message": validation_error}
+
+        capacity, capacity_error = input_validation.parse_bounded_number(capacity, "Capacity", min_val=1, max_val=100000)
+        if capacity_error:
+            return {"status": "error", "message": capacity_error}
 
         if entry == "Paid Entry":
-            try:
-                entry_fee = int(entry_fee) if entry_fee is not None else 0
-            except (ValueError, TypeError):
-                return {"status": "error", "message": "Entry Fee must be an integer."}
+            entry_fee, fee_error = input_validation.parse_bounded_number(
+                entry_fee if entry_fee is not None else 0, "Entry Fee", min_val=0, max_val=1000000
+            )
+            if fee_error:
+                return {"status": "error", "message": fee_error}
         else:
             entry_fee = None
 
@@ -381,6 +390,25 @@ def register_tournament_handler(tournament_id, user_email, data):
         gamer_ids = data.get("gamer_ids", [])
         if not gamer_ids or not isinstance(gamer_ids, list):
             return {"status": "error", "message": "Gamer IDs are required and must be a list."}
+
+        # SECURITY/INTEGRITY: the client-side registration form gates submission on every
+        # slot being filled with a real-looking ID, but that's only ever enforced in the
+        # browser — a direct API call could previously send a single ID for a 4-player
+        # squad, blank/whitespace-only entries, duplicate IDs across slots, or an absurdly
+        # long string in any slot.
+        expected_team_size = 4 if tournament.get("mode", "Squad") == "Squad" else 1
+        if len(gamer_ids) != expected_team_size:
+            return {"status": "error", "message": f"This tournament requires exactly {expected_team_size} gamer ID(s)."}
+        cleaned_ids = []
+        for gid in gamer_ids:
+            if not isinstance(gid, str) or not gid.strip():
+                return {"status": "error", "message": "Every gamer ID slot must be filled in."}
+            if len(gid) > 50:
+                return {"status": "error", "message": "Gamer ID is too long."}
+            cleaned_ids.append(gid.strip())
+        if len(set(cleaned_ids)) != len(cleaned_ids):
+            return {"status": "error", "message": "Duplicate gamer ID entered — each player must be unique."}
+        gamer_ids = cleaned_ids
 
         # Entry fee is read from the tournament document (server-side/admin-set) — never trust
         # a client-supplied amount. A paid tournament requires a verified Razorpay payment.
@@ -481,27 +509,39 @@ def update_tournament_handler(tournament_id, data, files=None):
 
         update_doc = {}
 
-        if game is not None: update_doc["game"] = game
-        if title is not None: update_doc["title"] = title
-        if prize is not None: update_doc["prize"] = prize
+        if game is not None:
+            err = input_validation.validate_text(game, "Game", max_len=60)
+            if err:
+                return {"status": "error", "message": err}
+            update_doc["game"] = game
+        if title is not None:
+            err = input_validation.validate_text(title, "Title", max_len=150)
+            if err:
+                return {"status": "error", "message": err}
+            update_doc["title"] = title
+        if prize is not None:
+            err = input_validation.validate_text(prize, "Prize Pool", max_len=100)
+            if err:
+                return {"status": "error", "message": err}
+            update_doc["prize"] = prize
         if entry is not None: update_doc["entry"] = entry
         if status is not None:
             update_doc["status"] = status
             if status == "cancelled":
                 update_doc["registration_open"] = False
-        
+
         if capacity is not None:
-            try:
-                update_doc["capacity"] = int(capacity)
-            except (ValueError, TypeError):
-                return {"status": "error", "message": "Capacity must be an integer."}
+            capacity, err = input_validation.parse_bounded_number(capacity, "Capacity", min_val=1, max_val=100000)
+            if err:
+                return {"status": "error", "message": err}
+            update_doc["capacity"] = capacity
 
         if entry == "Paid Entry" or (entry is None and existing.get("entry") == "Paid Entry"):
             if entry_fee is not None:
-                try:
-                    update_doc["entry_fee"] = int(entry_fee)
-                except (ValueError, TypeError):
-                    return {"status": "error", "message": "Entry Fee must be an integer."}
+                entry_fee, err = input_validation.parse_bounded_number(entry_fee, "Entry Fee", min_val=0, max_val=1000000)
+                if err:
+                    return {"status": "error", "message": err}
+                update_doc["entry_fee"] = entry_fee
         elif entry == "Free Entry":
             update_doc["entry_fee"] = None
 

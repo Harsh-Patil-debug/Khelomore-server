@@ -10,6 +10,7 @@ import cloudinary.uploader
 from bson import ObjectId
 from .db_connection import get_db
 from .upload_validation import validate_image_upload
+from . import input_validation
 
 # Default standard operating slots (10:00 AM - 10:00 PM, 1-hour intervals)
 DEFAULT_SLOTS = [
@@ -361,22 +362,45 @@ def create_cafe_handler(data, files=None):
                 "message": "Name, Area, and Price Per Hour are required fields."
             }
 
-        try:
-            price_per_hour = int(price_per_hour)
-        except ValueError:
-            return {
-                "status": "error",
-                "message": "Price Per Hour must be an integer."
-            }
+        validation_error = (
+            input_validation.validate_text(name, "Name", max_len=100)
+            or input_validation.validate_text(area, "Area", max_len=100)
+        )
+        if validation_error:
+            return {"status": "error", "message": validation_error}
 
-        # Parse coordinates
+        price_per_hour, price_error = input_validation.parse_bounded_number(
+            price_per_hour, "Price Per Hour", min_val=0, max_val=100000
+        )
+        if price_error:
+            return {"status": "error", "message": price_error}
+
+        owner_email_input = data.get("owner_email") or data.get("ownerEmail") or data.get("contact_email") or data.get("contactEmail")
+        if owner_email_input:
+            email_error = input_validation.validate_email(owner_email_input)
+            if email_error:
+                return {"status": "error", "message": email_error}
+
+        phone_input = data.get("phone")
+        if phone_input:
+            phone_error = input_validation.validate_phone(phone_input, required=False)
+            if phone_error:
+                return {"status": "error", "message": phone_error}
+
+        # Parse coordinates — out-of-range/invalid values fall back to the Nerul default
+        # below rather than hard-failing, matching this handler's existing lenient style
+        # for a field that's genuinely optional at signup time.
         try:
             latitude = float(latitude) if latitude is not None else None
+            if latitude is not None and not (-90 <= latitude <= 90):
+                latitude = None
         except ValueError:
             latitude = None
 
         try:
             longitude = float(longitude) if longitude is not None else None
+            if longitude is not None and not (-180 <= longitude <= 180):
+                longitude = None
         except ValueError:
             longitude = None
 
@@ -442,19 +466,30 @@ def create_cafe_handler(data, files=None):
                 else:
                     text_images = [images.strip()]
 
+        # Text-supplied image URLs (unlike Cloudinary uploads, these are arbitrary
+        # client-supplied strings) — drop anything that isn't a real http(s) URL rather
+        # than storing it as-is and later rendering it as an <img src>.
+        text_images = [img for img in text_images if isinstance(img, str) and not input_validation.validate_url(img, "Image URL")]
+
         final_images.extend(text_images)
 
         if not final_images:
             final_images = ["https://images.unsplash.com/photo-1542751371-adc38448a05e?q=80&w=600"]
 
-        # Construct MongoDB document
+        # Construct MongoDB document. Rating/reviews are cosmetic display fields with a
+        # sensible fallback already established by this handler — clamp out-of-range values
+        # to that same fallback rather than hard-failing cafe creation over them.
         try:
             rating_val = float(data.get("rating") or 5.0)
+            if not (0 <= rating_val <= 5):
+                rating_val = 5.0
         except (ValueError, TypeError):
             rating_val = 5.0
 
         try:
             reviews_val = int(data.get("reviews") or data.get("review_count") or 0)
+            if reviews_val < 0:
+                reviews_val = 0
         except (ValueError, TypeError):
             reviews_val = 0
 
@@ -514,19 +549,33 @@ def update_cafe_handler(cafe_id, data):
         from bson import ObjectId
         update_fields = {}
         if "name" in data:
+            err = input_validation.validate_text(data["name"], "Name", max_len=100)
+            if err:
+                return {"status": "error", "message": err}
             update_fields["name"] = data["name"]
         if "area" in data:
+            err = input_validation.validate_text(data["area"], "Area", max_len=100)
+            if err:
+                return {"status": "error", "message": err}
             update_fields["area"] = data["area"]
-        if "pricePerHour" in data:
-            update_fields["price_per_hour"] = int(data["pricePerHour"])
-        if "price_per_hour" in data:
-            update_fields["price_per_hour"] = int(data["price_per_hour"])
+        if "pricePerHour" in data or "price_per_hour" in data:
+            raw_price = data.get("pricePerHour", data.get("price_per_hour"))
+            price, err = input_validation.parse_bounded_number(raw_price, "Price Per Hour", min_val=0, max_val=100000)
+            if err:
+                return {"status": "error", "message": err}
+            update_fields["price_per_hour"] = price
         if "distanceKm" in data:
             update_fields["distance_km"] = float(data["distanceKm"])
         if "latitude" in data:
-            update_fields["latitude"] = float(data["latitude"])
+            lat, err = input_validation.parse_bounded_number(data["latitude"], "Latitude", min_val=-90, max_val=90, is_float=True)
+            if err:
+                return {"status": "error", "message": err}
+            update_fields["latitude"] = lat
         if "longitude" in data:
-            update_fields["longitude"] = float(data["longitude"])
+            lon, err = input_validation.parse_bounded_number(data["longitude"], "Longitude", min_val=-180, max_val=180, is_float=True)
+            if err:
+                return {"status": "error", "message": err}
+            update_fields["longitude"] = lon
         if "specs" in data:
             update_fields["specs"] = data["specs"]
             update_fields["amenities"] = data["specs"]
@@ -535,23 +584,41 @@ def update_cafe_handler(cafe_id, data):
         if "slots" in data:
             update_fields["slots"] = data["slots"]
         if "address" in data:
+            err = input_validation.validate_text(data["address"], "Address", max_len=400, required=False)
+            if err:
+                return {"status": "error", "message": err}
             update_fields["address"] = data["address"]
         if "city" in data:
+            err = input_validation.validate_text(data["city"], "City", max_len=60, required=False)
+            if err:
+                return {"status": "error", "message": err}
             update_fields["city"] = data["city"]
         if "phone" in data:
+            err = input_validation.validate_phone(data["phone"], required=False)
+            if err:
+                return {"status": "error", "message": err}
             update_fields["phone"] = data["phone"]
-        if "contact_email" in data:
-            update_fields["contact_email"] = data["contact_email"]
-        if "contactEmail" in data:
-            update_fields["contact_email"] = data["contactEmail"]
-        if "banner_url" in data:
-            update_fields["banner_url"] = data["banner_url"]
-        if "bannerUrl" in data:
-            update_fields["banner_url"] = data["bannerUrl"]
-        if "logo_url" in data:
-            update_fields["logo_url"] = data["logo_url"]
-        if "logoUrl" in data:
-            update_fields["logo_url"] = data["logoUrl"]
+        if "contact_email" in data or "contactEmail" in data:
+            email_val = data.get("contact_email", data.get("contactEmail"))
+            if email_val:
+                err = input_validation.validate_email(email_val)
+                if err:
+                    return {"status": "error", "message": err}
+            update_fields["contact_email"] = email_val
+        if "banner_url" in data or "bannerUrl" in data:
+            url_val = data.get("banner_url", data.get("bannerUrl"))
+            if url_val:
+                err = input_validation.validate_url(url_val, "Banner URL")
+                if err:
+                    return {"status": "error", "message": err}
+            update_fields["banner_url"] = url_val
+        if "logo_url" in data or "logoUrl" in data:
+            url_val = data.get("logo_url", data.get("logoUrl"))
+            if url_val:
+                err = input_validation.validate_url(url_val, "Logo URL")
+                if err:
+                    return {"status": "error", "message": err}
+            update_fields["logo_url"] = url_val
         if "operating_hours" in data:
             update_fields["operating_hours"] = data["operating_hours"]
             update_fields["slots"] = generate_slots_from_hours(data["operating_hours"])
@@ -562,7 +629,24 @@ def update_cafe_handler(cafe_id, data):
             update_fields["amenities"] = data["amenities"]
             update_fields["specs"] = data["amenities"]
         if "social" in data:
-            update_fields["social"] = data["social"]
+            social = data["social"] or {}
+            if isinstance(social, dict):
+                # Instagram is conventionally entered as a bare handle ("@cafe"), not a full
+                # URL — both places that collect it in the frontends use that placeholder —
+                # so it only gets a length cap, not URL-format validation. YouTube/Facebook
+                # are validated as real URLs.
+                instagram = social.get("instagram")
+                if instagram:
+                    err = input_validation.validate_text(instagram, "Instagram", max_len=80, required=False)
+                    if err:
+                        return {"status": "error", "message": err}
+                for platform in ("youtube", "facebook"):
+                    link = social.get(platform)
+                    if link:
+                        err = input_validation.validate_url(link, platform.capitalize() + " link")
+                        if err:
+                            return {"status": "error", "message": err}
+            update_fields["social"] = social
 
         if not update_fields:
             return {"status": "error", "message": "No valid fields to update."}

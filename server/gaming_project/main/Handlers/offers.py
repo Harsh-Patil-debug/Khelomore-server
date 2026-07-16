@@ -86,12 +86,18 @@ def create_offer_handler(data):
 
         if not name:
             return {"status": "error", "message": "Offer name is required."}, 400
+        if len(name) > 100:
+            return {"status": "error", "message": "Offer name must be at most 100 characters."}, 400
         if not cafe_id:
             return {"status": "error", "message": "cafe_id is required."}, 400
         if discount_pct <= 0 or discount_pct > 90:
             return {"status": "error", "message": "Discount must be between 1 and 90."}, 400
         if not start_date or not end_date:
             return {"status": "error", "message": "start_date and end_date are required."}, 400
+        # start_date/end_date are ISO "YYYY-MM-DD" strings, so a plain string comparison is
+        # correct for ordering — no need to parse them into real dates for this check.
+        if end_date < start_date:
+            return {"status": "error", "message": "End date must be on or after the start date."}, 400
 
         from .bookings_handler import IST
         doc = {

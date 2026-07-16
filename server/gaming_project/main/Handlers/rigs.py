@@ -3,6 +3,7 @@
 
 from bson import ObjectId
 from .db_connection import get_db
+from . import input_validation
 
 # Default rigs template to seed for each cafe
 SEED_RIG_TEMPLATES = [
@@ -243,7 +244,11 @@ def create_rig_handler(data):
         spec = data.get("spec") or data.get("specs") or ""
         status = data.get("status", "available")
         zone = data.get("zone", "Standard")
-        hourly_price = int(data.get("hourly_price") or data.get("hourlyPrice") or 100)
+        hourly_price, price_error = input_validation.parse_bounded_number(
+            data.get("hourly_price") or data.get("hourlyPrice") or 100, "Hourly Price", min_val=0, max_val=100000
+        )
+        if price_error:
+            return {"status": "error", "message": price_error}
         cafe_id = data.get("cafeId") or data.get("cafe_id")
 
         rig_doc = {
@@ -332,10 +337,12 @@ def update_rig_handler(rig_id, data):
         if "zone" in data:
             update_fields["zone"] = data["zone"]
         if "hourly_price" in data or "hourlyPrice" in data:
-            try:
-                update_fields["hourly_price"] = int(data.get("hourly_price") or data.get("hourlyPrice"))
-            except (ValueError, TypeError):
-                pass
+            price, price_error = input_validation.parse_bounded_number(
+                data.get("hourly_price") or data.get("hourlyPrice"), "Hourly Price", min_val=0, max_val=100000
+            )
+            if price_error:
+                return {"status": "error", "message": price_error}
+            update_fields["hourly_price"] = price
         if "cafeId" in data or "cafe_id" in data:
             update_fields["cafe_id"] = data.get("cafeId") or data.get("cafe_id")
 

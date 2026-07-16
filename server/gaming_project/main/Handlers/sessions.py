@@ -6,6 +6,7 @@ import random
 from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 from .db_connection import get_db
+from . import input_validation
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -258,8 +259,12 @@ def start_session_handler(booking_id: str = None, data: dict = None):
             # 2. Starting a manual walk-in session from scratch
             system_id = data.get("system_id") or data.get("systemId")
             customer_name = data.get("customer_name") or data.get("customerName") or "Walk-in Customer"
-            hours = float(data.get("duration_hours") or data.get("hours") or 1.0)
-            
+            hours, hours_error = input_validation.parse_bounded_number(
+                data.get("duration_hours") or data.get("hours") or 1.0, "Duration", min_val=0.5, max_val=24, is_float=True
+            )
+            if hours_error or hours is None:
+                return {"status": "error", "message": hours_error or "Duration is required."}
+
             rig = db_main.rigs.find_one({"_id": ObjectId(system_id)})
             if not rig:
                 return {"status": "error", "message": "Hardware station not found."}
