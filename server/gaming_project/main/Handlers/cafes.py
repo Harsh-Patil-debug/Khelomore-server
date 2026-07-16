@@ -285,6 +285,16 @@ def map_cafe_doc(doc, user_lat=None, user_lon=None, public=False):
         "operating_hours": doc.get("operating_hours") or {"open": "10:00", "close": "23:00"},
         "amenities": doc.get("amenities") or specs_list,
         "social": doc.get("social") or {"instagram": "", "youtube": "", "facebook": ""},
+
+        # Fields shared with the public partner-application form.
+        "ownerName": doc.get("owner_name", ""),
+        "state": doc.get("state", ""),
+        "pcCount": doc.get("pc_count"),
+        "ps5Count": doc.get("ps5_count"),
+        "otherDevices": doc.get("other_devices", ""),
+        "openingHours": doc.get("opening_hours_text", ""),
+        "website": doc.get("website", ""),
+        "message": doc.get("message", ""),
     }
 
 
@@ -387,6 +397,51 @@ def create_cafe_handler(data, files=None):
             if phone_error:
                 return {"status": "error", "message": phone_error}
 
+        # Fields shared with the public partner-application form — kept optional here since
+        # a cafe can also be created directly by a super admin without going through that
+        # flow at all, but validated the same way whenever they're present.
+        owner_name_input = data.get("ownerName") or data.get("owner_name")
+        if owner_name_input:
+            err = input_validation.validate_text(owner_name_input, "Owner name", max_len=80, required=False)
+            if err:
+                return {"status": "error", "message": err}
+
+        state_input = data.get("state")
+        if state_input:
+            err = input_validation.validate_text(state_input, "State", max_len=60, required=False)
+            if err:
+                return {"status": "error", "message": err}
+
+        pc_count_val, pc_count_err = input_validation.parse_bounded_number(
+            data.get("pcCount"), "PC count", min_val=0, max_val=999, required=False
+        )
+        if pc_count_err:
+            return {"status": "error", "message": pc_count_err}
+
+        ps5_count_val, ps5_count_err = input_validation.parse_bounded_number(
+            data.get("ps5Count"), "PS5 count", min_val=0, max_val=999, required=False
+        )
+        if ps5_count_err:
+            return {"status": "error", "message": ps5_count_err}
+
+        for field_key, label, max_len in (
+            ("otherDevices", "Other devices", 200),
+            ("openingHours", "Opening hours", 80),
+            ("instagram", "Instagram", 80),
+            ("message", "Message", 800),
+        ):
+            value = data.get(field_key)
+            if value:
+                err = input_validation.validate_text(value, label, max_len=max_len, required=False)
+                if err:
+                    return {"status": "error", "message": err}
+
+        website_input = data.get("website")
+        if website_input:
+            err = input_validation.validate_url(website_input, "Website")
+            if err:
+                return {"status": "error", "message": err}
+
         # Parse coordinates — out-of-range/invalid values fall back to the Nerul default
         # below rather than hard-failing, matching this handler's existing lenient style
         # for a field that's genuinely optional at signup time.
@@ -429,6 +484,7 @@ def create_cafe_handler(data, files=None):
 
         # Handle Cloudinary upload (supports multiple files: image, image_1, image_2, ...)
         uploaded_urls = []
+        logo_url = ""
         if files:
             upload_keys = ["image"] + [f"image_{i}" for i in range(1, 20)]
             for key in upload_keys:
@@ -445,6 +501,25 @@ def create_cafe_handler(data, files=None):
                             print(f"[Cloudinary] Uploaded '{key}' -> {url}")
                     except Exception as upload_err:
                         print(f"[Cloudinary] Upload failed for '{key}': {upload_err}")
+
+            # Separate single logo upload — same field name/behavior as the partner
+            # application form, so a logo attached there can carry straight through.
+            if "logo" in files:
+                logo_file = files["logo"]
+                logo_validation_error = validate_image_upload(logo_file)
+                if not logo_validation_error:
+                    try:
+                        logo_upload_result = cloudinary.uploader.upload(logo_file)
+                        logo_url = logo_upload_result.get("secure_url") or ""
+                    except Exception as upload_err:
+                        print(f"[Cloudinary] Logo upload failed: {upload_err}")
+
+        # A logo URL may also arrive as a plain string (e.g. carried over from an approved
+        # partner application that already uploaded one), not just as a fresh file upload.
+        if not logo_url:
+            logo_url_input = data.get("logoUrl") or data.get("logo_url") or data.get("logo")
+            if logo_url_input and isinstance(logo_url_input, str) and not input_validation.validate_url(logo_url_input, "Logo URL"):
+                logo_url = logo_url_input
 
         # Construct final images list
         final_images = list(uploaded_urls)
@@ -504,10 +579,21 @@ def create_cafe_handler(data, files=None):
             "reviews": reviews_val,
             "specs": specs,
             "images": final_images,
+            "logo_url": logo_url,
             "owner_email": data.get("owner_email") or data.get("ownerEmail") or data.get("contact_email") or data.get("contactEmail") or "",
             "address": data.get("address") or "",
             "city": data.get("city") or "",
-            "phone": data.get("phone") or ""
+            "phone": data.get("phone") or "",
+            # Fields shared with the public partner-application form.
+            "owner_name": owner_name_input or "",
+            "state": state_input or "",
+            "pc_count": pc_count_val,
+            "ps5_count": ps5_count_val,
+            "other_devices": data.get("otherDevices") or "",
+            "opening_hours_text": data.get("openingHours") or "",
+            "website": website_input or "",
+            "message": data.get("message") or "",
+            "social": {"instagram": data.get("instagram") or ""},
         }
 
         result = db_main.cafes.insert_one(cafe_doc)
@@ -647,6 +733,55 @@ def update_cafe_handler(cafe_id, data):
                         if err:
                             return {"status": "error", "message": err}
             update_fields["social"] = social
+
+        # Fields shared with the public partner-application form.
+        if "ownerName" in data or "owner_name" in data:
+            val = data.get("ownerName", data.get("owner_name"))
+            if val:
+                err = input_validation.validate_text(val, "Owner name", max_len=80, required=False)
+                if err:
+                    return {"status": "error", "message": err}
+            update_fields["owner_name"] = val
+        if "state" in data:
+            if data["state"]:
+                err = input_validation.validate_text(data["state"], "State", max_len=60, required=False)
+                if err:
+                    return {"status": "error", "message": err}
+            update_fields["state"] = data["state"]
+        if "pcCount" in data:
+            val, err = input_validation.parse_bounded_number(data["pcCount"], "PC count", min_val=0, max_val=999, required=False)
+            if err:
+                return {"status": "error", "message": err}
+            update_fields["pc_count"] = val
+        if "ps5Count" in data:
+            val, err = input_validation.parse_bounded_number(data["ps5Count"], "PS5 count", min_val=0, max_val=999, required=False)
+            if err:
+                return {"status": "error", "message": err}
+            update_fields["ps5_count"] = val
+        if "otherDevices" in data:
+            if data["otherDevices"]:
+                err = input_validation.validate_text(data["otherDevices"], "Other devices", max_len=200, required=False)
+                if err:
+                    return {"status": "error", "message": err}
+            update_fields["other_devices"] = data["otherDevices"]
+        if "openingHours" in data:
+            if data["openingHours"]:
+                err = input_validation.validate_text(data["openingHours"], "Opening hours", max_len=80, required=False)
+                if err:
+                    return {"status": "error", "message": err}
+            update_fields["opening_hours_text"] = data["openingHours"]
+        if "website" in data:
+            if data["website"]:
+                err = input_validation.validate_url(data["website"], "Website")
+                if err:
+                    return {"status": "error", "message": err}
+            update_fields["website"] = data["website"]
+        if "message" in data:
+            if data["message"]:
+                err = input_validation.validate_text(data["message"], "Message", max_len=800, required=False)
+                if err:
+                    return {"status": "error", "message": err}
+            update_fields["message"] = data["message"]
 
         if not update_fields:
             return {"status": "error", "message": "No valid fields to update."}

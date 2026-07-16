@@ -87,6 +87,25 @@ class RegisterValidationTests(SecurityTestCase):
 class CafeValidationTests(SecurityTestCase):
     """cafes.py create/update — price bounds, coordinate bounds, email/phone/URL format."""
 
+    def test_create_cafe_accepts_fields_shared_with_partner_application_form(self):
+        resp = self.client.post(
+            "/api/v1/main/cafes/",
+            {
+                "name": "Full Field Cafe", "area": "Area", "pricePerHour": "150",
+                "ownerName": "Jane Owner", "state": "Maharashtra", "pcCount": "12",
+                "ps5Count": "3", "otherDevices": "2 racing sims", "openingHours": "10 AM - 11 PM",
+                "website": "https://example.com", "instagram": "@myfullcafe", "message": "Excited to join!",
+            },
+            **self.admin_header(),
+        )
+        self.assertEqual(resp.status_code, 201)
+        cafe = resp.json()["cafe"]
+        self.track("cafes", __import__("bson").ObjectId(cafe["id"]))
+        self.assertEqual(cafe["ownerName"], "Jane Owner")
+        self.assertEqual(cafe["state"], "Maharashtra")
+        self.assertEqual(cafe["pcCount"], 12)
+        self.assertEqual(cafe["social"]["instagram"], "@myfullcafe")
+
     def test_create_cafe_rejects_negative_price(self):
         resp = self.client.post(
             "/api/v1/main/cafes/",
@@ -251,6 +270,7 @@ class PartnerApplicationValidationTests(SecurityTestCase):
             "cafeName": "Test Cafe", "ownerName": "Test Owner", "phone": "+919876543210",
             "email": "owner@example.com", "city": "Mumbai", "state": "Maharashtra",
             "address": "123 Test Street", "pcCount": "10",
+            "area": "Test Area", "pricePerHour": "100",
         }
         payload.update(overrides)
         return payload
@@ -280,6 +300,38 @@ class PartnerApplicationValidationTests(SecurityTestCase):
             self._base_payload(message="x" * 801),
         )
         self.assertEqual(resp.status_code, 400)
+
+    def test_rejects_missing_area_or_price(self):
+        # area/pricePerHour are shared with the "Add Gaming Cafe" admin form and required
+        # there too, so the public application requires them as well now.
+        resp = self.client.post(
+            "/api/v1/main/partner-applications/", self._base_payload(area="")
+        )
+        self.assertEqual(resp.status_code, 400)
+        resp2 = self.client.post(
+            "/api/v1/main/partner-applications/", self._base_payload(pricePerHour="")
+        )
+        self.assertEqual(resp2.status_code, 400)
+
+    def test_rejects_out_of_range_rating(self):
+        resp = self.client.post(
+            "/api/v1/main/partner-applications/", self._base_payload(rating="999")
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_accepts_full_field_set_shared_with_add_cafe_form(self):
+        resp = self.client.post(
+            "/api/v1/main/partner-applications/",
+            self._base_payload(
+                latitude="19.03", longitude="73.02", specs="RTX 4090, 240Hz",
+                rating="4.5", reviews="20", imageUrl="https://example.com/photo.jpg",
+            ),
+        )
+        self.assertEqual(resp.status_code, 201)
+        app = resp.json()["application"]
+        self.track("partner_applications", __import__("bson").ObjectId(app["id"]))
+        self.assertEqual(app["area"], "Test Area")
+        self.assertEqual(app["pricePerHour"], 100)
 
     def test_valid_application_accepted(self):
         resp = self.client.post(

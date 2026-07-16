@@ -11,7 +11,11 @@ from .upload_validation import validate_image_upload
 from . import input_validation
 
 # Optional fields: stored if provided, never required.
-_OPTIONAL_FIELDS = ["ps5Count", "otherDevices", "openingHours", "website", "instagram", "mapsLink", "message"]
+_OPTIONAL_FIELDS = [
+    "ps5Count", "otherDevices", "openingHours", "website", "instagram", "mapsLink", "message",
+    # Shared with the super admin's "Add Gaming Cafe" form.
+    "latitude", "longitude", "specs", "imageUrl",
+]
 
 # Public, unauthenticated form — cap how many photos a single submission can attach so this
 # endpoint can't be used to force unbounded Cloudinary uploads.
@@ -39,6 +43,10 @@ def get_partner_applications_handler():
                 "state": doc.get("state", ""),
                 "address": doc.get("address", ""),
                 "pcCount": doc.get("pcCount", 0),
+                "area": doc.get("area", ""),
+                "pricePerHour": doc.get("pricePerHour"),
+                "rating": doc.get("rating"),
+                "reviews": doc.get("reviews"),
                 "status": doc.get("status", "pending"),
                 "submittedAt": doc.get("submittedAt") or doc.get("submitted_at") or datetime.now().isoformat(),
                 "photos": doc.get("photos", []),
@@ -71,8 +79,12 @@ def create_partner_application_handler(data, files=None):
         state = data.get("state")
         address = data.get("address")
         pc_count = data.get("pcCount")
+        area = data.get("area")
+        price_per_hour = data.get("pricePerHour")
 
-        if not cafe_name or not owner_name or not phone or not email or not city or not state or not address or not pc_count:
+        # area/pricePerHour mirror the same two fields the super admin's "Add Gaming Cafe"
+        # form requires, so the two forms collect the same required set end to end.
+        if not cafe_name or not owner_name or not phone or not email or not city or not state or not address or not pc_count or not area or price_per_hour is None:
             return {"status": "error", "message": "All fields are required."}, 400
 
         # SECURITY: this is the only fully public, unauthenticated form-submission endpoint
@@ -86,6 +98,7 @@ def create_partner_application_handler(data, files=None):
             or input_validation.validate_text(city, "City", max_len=60)
             or input_validation.validate_text(state, "State", max_len=60)
             or input_validation.validate_text(address, "Address", max_len=400)
+            or input_validation.validate_text(area, "Area", max_len=100)
         )
         if validation_error:
             return {"status": "error", "message": validation_error}, 400
@@ -94,20 +107,48 @@ def create_partner_application_handler(data, files=None):
         if pc_count_error:
             return {"status": "error", "message": pc_count_error}, 400
 
+        price_per_hour, price_error = input_validation.parse_bounded_number(
+            price_per_hour, "Price Per Hour", min_val=0, max_val=100000
+        )
+        if price_error:
+            return {"status": "error", "message": price_error}, 400
+
         ps5_count = data.get("ps5Count")
         if ps5_count:
             _, err = input_validation.parse_bounded_number(ps5_count, "PS5 count", min_val=0, max_val=999)
             if err:
                 return {"status": "error", "message": err}, 400
 
-        for field in ("website", "mapsLink"):
+        # Same optional fields the "Add Gaming Cafe" admin form collects — kept optional
+        # here too, since a rating/review count for a not-yet-listed cafe is inherently
+        # a placeholder, not something an applicant should be forced to fabricate.
+        rating_val = None
+        if data.get("rating"):
+            rating_val, err = input_validation.parse_bounded_number(data.get("rating"), "Rating", min_val=0, max_val=5, is_float=True)
+            if err:
+                return {"status": "error", "message": err}, 400
+
+        reviews_val = None
+        if data.get("reviews"):
+            reviews_val, err = input_validation.parse_bounded_number(data.get("reviews"), "Reviews", min_val=0)
+            if err:
+                return {"status": "error", "message": err}, 400
+
+        for coord_field, label, bound in (("latitude", "Latitude", 90), ("longitude", "Longitude", 180)):
+            value = data.get(coord_field)
+            if value:
+                _, err = input_validation.parse_bounded_number(value, label, min_val=-bound, max_val=bound, is_float=True)
+                if err:
+                    return {"status": "error", "message": err}, 400
+
+        for field in ("website", "mapsLink", "imageUrl"):
             value = data.get(field)
             if value:
                 err = input_validation.validate_url(value, field)
                 if err:
                     return {"status": "error", "message": err}, 400
 
-        optional_text_limits = {"otherDevices": 200, "openingHours": 80, "instagram": 80, "message": 800}
+        optional_text_limits = {"otherDevices": 200, "openingHours": 80, "instagram": 80, "message": 800, "specs": 200}
         for field, max_len in optional_text_limits.items():
             value = data.get(field)
             if value:
@@ -124,9 +165,15 @@ def create_partner_application_handler(data, files=None):
             "state": state,
             "address": address,
             "pcCount": pc_count,
+            "area": area,
+            "pricePerHour": price_per_hour,
             "status": "pending",
             "submittedAt": datetime.now().isoformat()
         }
+        if rating_val is not None:
+            doc["rating"] = rating_val
+        if reviews_val is not None:
+            doc["reviews"] = reviews_val
         for field in _OPTIONAL_FIELDS:
             value = data.get(field)
             if value:
