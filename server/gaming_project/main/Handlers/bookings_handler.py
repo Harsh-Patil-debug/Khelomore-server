@@ -234,14 +234,20 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
         hourly_price = _resolve_hourly_price(cafe_id, rig_name_for_price)
         total_price = int(hourly_price * len(slots))
 
+        payment_settlement = None
         if total_price > 0:
             from .payments import verify_razorpay_payment
-            if not verify_razorpay_payment(razorpay_order_id, razorpay_payment_id, razorpay_signature, total_price * 100):
+            if not verify_razorpay_payment(razorpay_order_id, razorpay_payment_id, razorpay_signature, total_price * 100, cafe_id=cafe_id):
                 return {
                     "status": "error",
                     "message": "Payment verification failed. Please complete payment before booking."
                 }, 402
             payment_status = "paid"
+            # Record which account the money actually landed in, so a booking paid via the
+            # platform fallback (cafe hadn't connected their own Razorpay yet) can be found
+            # and settled to the owner manually later.
+            order_record = db_main.cafe_payment_orders.find_one({"order_id": razorpay_order_id, "cafe_id": cafe_id})
+            payment_settlement = "platform_pending_payout" if (order_record and order_record.get("used_platform_fallback")) else "direct_to_cafe"
         else:
             payment_status = "paid"  # free slot, nothing owed
 
@@ -297,6 +303,7 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
                 "rig": rig,
                 "status": group_status,
                 "payment_status": payment_status,
+                "payment_settlement": payment_settlement,
                 "createdAt": datetime.now(IST)
             }
             if group_status == "Active" and group_remaining > 0:

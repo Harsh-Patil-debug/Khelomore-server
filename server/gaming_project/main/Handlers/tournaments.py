@@ -414,13 +414,18 @@ def register_tournament_handler(tournament_id, user_email, data):
         # a client-supplied amount. A paid tournament requires a verified Razorpay payment.
         entry_fee = tournament.get("entry_fee") or 0
         is_paid_entry = tournament.get("entry") == "Paid Entry" and int(entry_fee) > 0
+        payment_settlement = None
         if is_paid_entry:
             from .payments import verify_razorpay_payment
             razorpay_order_id = data.get("razorpay_order_id")
             razorpay_payment_id = data.get("razorpay_payment_id")
             razorpay_signature = data.get("razorpay_signature")
-            if not verify_razorpay_payment(razorpay_order_id, razorpay_payment_id, razorpay_signature, int(entry_fee) * 100):
+            tournament_cafe_id = tournament.get("cafe_id")
+            if not verify_razorpay_payment(razorpay_order_id, razorpay_payment_id, razorpay_signature, int(entry_fee) * 100, cafe_id=tournament_cafe_id):
                 return {"status": "error", "message": "Payment verification failed. Please complete payment before registering."}
+            if tournament_cafe_id:
+                order_record = db_main.cafe_payment_orders.find_one({"order_id": razorpay_order_id, "cafe_id": tournament_cafe_id})
+                payment_settlement = "platform_pending_payout" if (order_record and order_record.get("used_platform_fallback")) else "direct_to_cafe"
 
         # Store registration info in database
         registration_doc = {
@@ -429,6 +434,7 @@ def register_tournament_handler(tournament_id, user_email, data):
             "user_email": user_email.strip().lower() if user_email else None,
             "gamer_ids": gamer_ids,
             "amount_paid": int(entry_fee) if is_paid_entry else 0,
+            "payment_settlement": payment_settlement,
             "registered_at": datetime.now(timezone.utc)
         }
         db_main.registrations.insert_one(registration_doc)

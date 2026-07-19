@@ -295,6 +295,21 @@ def map_cafe_doc(doc, user_lat=None, user_lon=None, public=False):
         "openingHours": doc.get("opening_hours_text", ""),
         "website": doc.get("website", ""),
         "message": doc.get("message", ""),
+
+        # Subscription (15-day free trial, then ₹1599/month) — callers that need this
+        # fresh should call subscriptions._ensure_defaults(db, doc) before mapping; these
+        # are safe fallbacks for callers that don't (e.g. the public listing, which never
+        # shows this to a cafe owner anyway).
+        "subscription_plan": "Pro",
+        "subscription_amount": doc.get("subscription_amount", 1599),
+        "subscription_status": doc.get("subscription_status", "active"),
+        "subscription_renewal": doc["subscription_due_date"].isoformat() if doc.get("subscription_due_date") else None,
+        "subscription_trial_welcome_shown": bool(doc.get("subscription_trial_welcome_shown")),
+
+        # Whether the owner has connected their own Razorpay account for booking
+        # payments. Never expose the actual key_id/secret here — see
+        # get_razorpay_credentials_status_handler for that (owner/super-admin only).
+        "razorpay_configured": bool(doc.get("razorpay_key_id") and doc.get("razorpay_key_secret_enc")),
     }
 
 
@@ -329,6 +344,19 @@ def get_cafes_handler(latitude=None, longitude=None, include_deleted=False):
 
         # Retrieve all cafes and sort by calculated distance (nearest first)
         query = {} if include_deleted else {"is_deleted": {"$ne": True}}
+        if not include_deleted:
+            # A cafe more than the grace period past its ₹1500/month subscription due
+            # date is hidden from the public listing until paid — the cafe owner's own
+            # dashboard is unaffected (it goes through get_my_cafes_handler, not this).
+            # Cafes that predate this feature (no subscription_grace_until set yet) are
+            # NOT retroactively hidden — that field only exists once something has
+            # actually looked at that cafe's subscription (see subscriptions.py).
+            from datetime import datetime, timezone, timedelta
+            now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+            query["$or"] = [
+                {"subscription_grace_until": {"$exists": False}},
+                {"subscription_grace_until": {"$gte": now_ist}},
+            ]
         docs = list(db_main.cafes.find(query))
         # include_deleted is already super-admin-gated at the view layer, so that path may
         # see full owner detail; the plain public listing must not.
@@ -815,6 +843,8 @@ def get_my_cafes_handler(owner_email, is_super_admin=False):
             query["owner_email"] = owner_email.strip().lower()
 
         docs = list(db_main.cafes.find(query))
+        from . import subscriptions
+        docs = [subscriptions._ensure_defaults(db_main, d) for d in docs]
         mapped_cafes = [map_cafe_doc(d) for d in docs]
         return {
             "status": "success",
@@ -825,6 +855,202 @@ def get_my_cafes_handler(owner_email, is_super_admin=False):
             "status": "error",
             "message": f"Failed to retrieve my cafes: {e}"
         }
+
+
+def get_razorpay_credentials_status_handler(cafe_id):
+    """
+    GET-side of the cafe owner's own Razorpay account settings — returns whether it's
+    configured and the (public, safe-to-show) key_id, but NEVER the key_secret. The
+    secret only ever flows one way: in via save_razorpay_credentials_handler, never back
+    out to any frontend.
+    """
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        doc = db_main.cafes.find_one({"_id": ObjectId(cafe_id)})
+        if not doc:
+            return {"status": "error", "message": "Cafe not found."}
+        configured = bool(doc.get("razorpay_key_id") and doc.get("razorpay_key_secret_enc"))
+        return {
+            "status": "success",
+            "configured": configured,
+            "key_id": doc.get("razorpay_key_id") if configured else None,
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to retrieve Razorpay settings: {e}"}
+
+
+def save_razorpay_credentials_handler(cafe_id, key_id, key_secret):
+    """
+    Saves the cafe owner's own Razorpay Key ID + Key Secret so their booking payments go
+    straight into their own account instead of the platform's. key_secret is encrypted at
+    rest with the same AES routine already used for TOTP secrets/phone numbers
+    (auth_handler.encrypt_secret_key) — it's never stored or returned in plaintext.
+    """
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        key_id = (key_id or "").strip()
+        key_secret = (key_secret or "").strip()
+        if not key_id or not key_secret:
+            return {"status": "error", "message": "Both Key ID and Key Secret are required."}
+        if not key_id.startswith(("rzp_live_", "rzp_test_")):
+            return {"status": "error", "message": "That doesn't look like a valid Razorpay Key ID."}
+
+        from .auth_handler import encrypt_secret_key, ENCRYPTION_KEY
+        encrypted_secret = encrypt_secret_key(key_secret, ENCRYPTION_KEY)
+
+        result = db_main.cafes.update_one(
+            {"_id": ObjectId(cafe_id)},
+            {"$set": {"razorpay_key_id": key_id, "razorpay_key_secret_enc": encrypted_secret}},
+        )
+        if result.matched_count == 0:
+            return {"status": "error", "message": "Cafe not found."}
+        return {"status": "success", "configured": True, "key_id": key_id}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to save Razorpay settings: {e}"}
+
+
+def get_razorpay_password_status_handler(cafe_id, caller_email):
+    """
+    GET-side of the second-factor Razorpay password gate: tells the frontend whether to
+    show "enter your Razorpay password to unlock" (already set) or "set a Razorpay
+    password first" (an account that predates this feature, or never finished signup with
+    one). caller_email is the AUTHENTICATED caller — a super admin viewing another
+    owner's cafe always sees is_owner=False and bypasses the gate entirely client-side.
+    """
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        cafe = db_main.cafes.find_one({"_id": ObjectId(cafe_id)})
+        if not cafe:
+            return {"status": "error", "message": "Cafe not found."}
+        is_owner = caller_email == (cafe.get("owner_email") or "").strip().lower()
+        if not is_owner:
+            return {"status": "success", "is_owner": False, "has_password": None}
+        admin = db_main.admins.find_one({"email": cafe["owner_email"]})
+        has_password = bool(admin and admin.get("razorpay_password_hash"))
+        return {"status": "success", "is_owner": True, "has_password": has_password}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to check Razorpay password status: {e}"}
+
+
+def set_razorpay_password_handler(cafe_id, caller_email, new_password):
+    """
+    First-time setup only — for a cafe owner's account that predates this feature (signup
+    never asked for a Razorpay password) or somehow has none. Refuses to overwrite an
+    existing one; that's a deliberate limitation, not an oversight — there's no "forgot
+    Razorpay password" recovery flow yet, so silently allowing a reset here would be a
+    bypass of the very gate this password exists to enforce.
+    """
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        cafe = db_main.cafes.find_one({"_id": ObjectId(cafe_id)})
+        if not cafe:
+            return {"status": "error", "message": "Cafe not found."}
+        if caller_email != (cafe.get("owner_email") or "").strip().lower():
+            return {"status": "error", "message": "Only this cafe's owner can set its Razorpay password."}
+
+        from . import input_validation
+        pw_error = input_validation.validate_password_strength(new_password or "")
+        if pw_error:
+            return {"status": "error", "message": pw_error}
+
+        admin = db_main.admins.find_one({"email": cafe["owner_email"]})
+        if not admin:
+            # Should be unreachable in production — a cafe's owner_email always has a
+            # matching db.admins document by the time they can reach this endpoint at all
+            # (authenticate_admin_owner already required a valid admin JWT). Guarding
+            # explicitly rather than letting update_one's no-op-when-no-match behavior
+            # report a silent, misleading "success".
+            return {"status": "error", "message": "Owner account not found."}
+        if admin.get("razorpay_password_hash"):
+            return {"status": "error", "message": "A Razorpay password is already set for this account."}
+
+        from .auth_handler import ph
+        db_main.admins.update_one(
+            {"_id": admin["_id"]},
+            {"$set": {"razorpay_password_hash": ph.hash(new_password)}},
+        )
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to set Razorpay password: {e}"}
+
+
+def verify_razorpay_password_handler(cafe_id, caller_email, password):
+    """
+    The actual unlock check. A super admin viewing someone else's cafe (caller_email !=
+    the cafe's own owner_email) bypasses this entirely — they already passed the stronger
+    super-admin authentication upstream. Lockout mirrors the existing login-attempt
+    lockout (same MAX_LOGIN_ATTEMPTS/LOGIN_LOCKOUT_MINUTES) so repeated guesses against
+    this gate are bounded the same way login guesses already are.
+    """
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        cafe = db_main.cafes.find_one({"_id": ObjectId(cafe_id)})
+        if not cafe:
+            return {"status": "error", "message": "Cafe not found."}
+
+        owner_email = (cafe.get("owner_email") or "").strip().lower()
+        if caller_email != owner_email:
+            # Super admin (or anyone authenticate_admin_owner already let through who isn't
+            # the literal owner) — bypass, no owner-only secret to check on their behalf.
+            return {"status": "success", "verified": True}
+
+        from datetime import datetime, timedelta, timezone
+        from .auth_handler import verify_password, ph, IST, MAX_LOGIN_ATTEMPTS, LOGIN_LOCKOUT_MINUTES
+
+        admin = db_main.admins.find_one({"email": owner_email})
+        if not admin or not admin.get("razorpay_password_hash"):
+            return {"status": "error", "needs_setup": True, "message": "No Razorpay password set yet for this account."}
+
+        locked_until = admin.get("razorpay_password_locked_until")
+        if locked_until:
+            if locked_until.tzinfo is None:
+                locked_until = locked_until.replace(tzinfo=timezone.utc).astimezone(IST)
+            if datetime.now(IST) < locked_until:
+                return {"status": "error", "message": "Too many incorrect attempts. Please try again later."}
+
+        if not verify_password(admin["razorpay_password_hash"], password or ""):
+            attempts = int(admin.get("razorpay_password_attempts", 0)) + 1
+            update_fields: dict = {"razorpay_password_attempts": attempts}
+            if attempts >= MAX_LOGIN_ATTEMPTS:
+                update_fields["razorpay_password_locked_until"] = datetime.now(IST) + timedelta(minutes=LOGIN_LOCKOUT_MINUTES)
+            db_main.admins.update_one({"_id": admin["_id"]}, {"$set": update_fields})
+            return {"status": "error", "message": "Incorrect Razorpay password."}
+
+        if admin.get("razorpay_password_attempts") or admin.get("razorpay_password_locked_until"):
+            db_main.admins.update_one(
+                {"_id": admin["_id"]},
+                {"$unset": {"razorpay_password_attempts": "", "razorpay_password_locked_until": ""}},
+            )
+        return {"status": "success", "verified": True}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to verify Razorpay password: {e}"}
+
+
+def delete_razorpay_credentials_handler(cafe_id):
+    """Disconnects the cafe's own Razorpay account — booking payments fall back to the platform account again."""
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        result = db_main.cafes.update_one(
+            {"_id": ObjectId(cafe_id)},
+            {"$unset": {"razorpay_key_id": "", "razorpay_key_secret_enc": ""}},
+        )
+        if result.matched_count == 0:
+            return {"status": "error", "message": "Cafe not found."}
+        return {"status": "success", "configured": False}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to disconnect Razorpay: {e}"}
 
 
 def delete_cafe_handler(cafe_id):
@@ -867,13 +1093,23 @@ def parse_google_maps_url_handler(url):
     """Parses a Google Maps link (short or long redirect) to extract coordinates and place name."""
     import re
     import requests
-    from urllib.parse import unquote
+    from urllib.parse import unquote, urlsplit
 
     if not url:
         return {"status": "error", "message": "URL parameter is required."}
 
+    # SECURITY: this endpoint is public (no auth) so both the super-admin "Add Gaming
+    # Cafe" form and the public "Partner Application" form can use it — a substring check
+    # like `"goo.gl" in url` is an SSRF hole: a URL such as "http://internal-host/#goo.gl"
+    # would pass it and this server would fetch whatever `internal-host` is. Only actually
+    # follow the redirect when the URL's real hostname is Google's own shortener domain.
+    try:
+        hostname = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return {"status": "error", "message": "Invalid URL."}
+
     resolved_url = url
-    if "maps.app.goo.gl" in url or "goo.gl" in url:
+    if hostname in ("goo.gl", "maps.app.goo.gl"):
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"

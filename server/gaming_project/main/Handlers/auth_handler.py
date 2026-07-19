@@ -57,10 +57,22 @@ if not JWT_SECRET:
     raise RuntimeError("JWT_SECRET environment variable is not set.")
 JWT_ALGORITHM         = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXP_DELTA_SECONDS = int(os.getenv("JWT_EXP_DELTA_SECONDS", "2592000"))
+# Shorter-lived sessions for the cafe-owner and super-admin panels (playhub-command /
+# cafe-command-center) — these control real money/cafe data, so they shouldn't stay
+# logged in for the same 30 days as a casual gamer-app session.
+JWT_ADMIN_EXP_DELTA_SECONDS = int(os.getenv("JWT_ADMIN_EXP_DELTA_SECONDS", "86400"))
 ENCRYPTION_KEY        = base64.b64decode(os.getenv("ENCRYPTION_KEY", ""))
 IV                    = base64.b64decode(os.getenv("IV", ""))
 IST = timezone(timedelta(hours=5, minutes=30))
 MAX_OTP_ATTEMPTS = int(os.getenv("MAX_OTP_ATTEMPTS", "5"))
+# Super admin login/signup OTPs expire much faster than other roles — the platform's most
+# sensitive login surface shouldn't leave a valid code sitting in an inbox for 10 minutes.
+SUPER_ADMIN_OTP_EXPIRY_MINUTES = int(os.getenv("SUPER_ADMIN_OTP_EXPIRY_MINUTES", "2"))
+OTP_EXPIRY_MINUTES = int(os.getenv("OTP_EXPIRY_MINUTES", "10"))
+
+
+def get_otp_expiry_minutes(role: str = "") -> int:
+    return SUPER_ADMIN_OTP_EXPIRY_MINUTES if role == "super_admin" else OTP_EXPIRY_MINUTES
 MAX_LOGIN_ATTEMPTS = int(os.getenv("MAX_LOGIN_ATTEMPTS", "5"))
 LOGIN_LOCKOUT_MINUTES = int(os.getenv("LOGIN_LOCKOUT_MINUTES", "15"))
 OTP_RESEND_COOLDOWN_SECONDS = int(os.getenv("OTP_RESEND_COOLDOWN_SECONDS", "45"))
@@ -144,11 +156,13 @@ def _ensure_revoked_tokens_index():
             pass
         _revoked_index_ensured = True
 
-def generate_token(email: str) -> str:
+def generate_token(email: str, is_admin: bool = False, role: str = "") -> str:
+    is_panel_account = role in ("admin", "super_admin") or is_admin
+    exp_seconds = JWT_ADMIN_EXP_DELTA_SECONDS if is_panel_account else JWT_EXP_DELTA_SECONDS
     payload = {
         'email': email,
         'jti': uuid.uuid4().hex,
-        'exp': datetime.now(IST) + timedelta(seconds=JWT_EXP_DELTA_SECONDS)
+        'exp': datetime.now(IST) + timedelta(seconds=exp_seconds)
     }
     token = jwt.encode(payload, JWT_SECRET, JWT_ALGORITHM)
     return token
@@ -220,13 +234,19 @@ def get_user_collection(is_admin=False, role=""):
         return db_main.admins
     return db_main.admins if is_admin else db_main.users
 
-def khelomore_register(gamertag, email, password, iv, phone=None, is_admin=False, role=""):
+def khelomore_register(gamertag, email, password, iv, phone=None, is_admin=False, role="", razorpay_password=None):
     """Signup Step 1 - creates pending user, sends OTP, NO JWT yet."""
     try:
         dec_gamertag = decrypt_data(gamertag, iv).strip()
         dec_email    = decrypt_data(email, iv).strip().lower()
         dec_password = decrypt_data(password, iv)
         dec_phone    = decrypt_data(phone, iv).strip() if phone else ""
+        # A cafe owner (role="admin") sets a SEPARATE password here that later gates access
+        # to entering/viewing their Razorpay credentials in cafe-command-center — distinct
+        # from their login password so a compromised login session alone can't unlock
+        # payment-routing settings.
+        is_cafe_owner_signup = (is_admin or role == "admin") and role != "super_admin"
+        dec_razorpay_password = decrypt_data(razorpay_password, iv) if razorpay_password else ""
     except Exception as e:
         return {"error": f"Decryption failed: {str(e)}"}, 400
 
@@ -241,9 +261,17 @@ def khelomore_register(gamertag, email, password, iv, phone=None, is_admin=False
     )
     if error:
         return {"error": error}, 400
+    if is_cafe_owner_signup:
+        if not dec_razorpay_password:
+            return {"error": "A Razorpay password is required to protect your payment settings."}, 400
+        razorpay_password_error = input_validation.validate_password_strength(dec_razorpay_password)
+        if razorpay_password_error:
+            return {"error": f"Razorpay password: {razorpay_password_error}"}, 400
+        if dec_razorpay_password == dec_password:
+            return {"error": "Your Razorpay password must be different from your login password."}, 400
 
     coll = get_user_collection(is_admin, role)
-    if (is_admin or role == "admin") and role != "super_admin":
+    if is_cafe_owner_signup:
         cafe_exists = db_main.cafes.find_one({"owner_email": dec_email, "is_deleted": {"$ne": True}})
         if not cafe_exists:
             return {"error": "This email is not authorized. Please contact the platform Super Admin to list your cafe first."}, 403
@@ -253,9 +281,9 @@ def khelomore_register(gamertag, email, password, iv, phone=None, is_admin=False
 
     password_hash = ph.hash(dec_password)
     otp_code      = str(random.randint(100000, 999999))
-    otp_expiry    = datetime.now(IST) + timedelta(minutes=10)
+    otp_expiry    = datetime.now(IST) + timedelta(minutes=get_otp_expiry_minutes(role))
 
-    coll.insert_one({
+    new_user_doc = {
         "gamertag":      dec_gamertag.upper().replace(" ", "_"),
         "email":         dec_email,
         "password_hash": password_hash,
@@ -267,7 +295,11 @@ def khelomore_register(gamertag, email, password, iv, phone=None, is_admin=False
         "rank":          "Recruit PRO I",
         "createdAt":     datetime.now(IST),
         "role":          role if role else ("admin" if is_admin else "user"),
-    })
+    }
+    if is_cafe_owner_signup:
+        new_user_doc["razorpay_password_hash"] = ph.hash(dec_razorpay_password)
+
+    coll.insert_one(new_user_doc)
 
     from .email_handler import send_otp_email
     send_otp_email(dec_email, otp_code, gamertag=dec_gamertag, purpose="signup")
@@ -323,7 +355,7 @@ def khelomore_login(email, password, iv, is_admin=False, role=""):
         coll.update_one({"_id": user["_id"]}, {"$unset": {"login_attempts": "", "login_locked_until": ""}})
 
     otp_code   = str(random.randint(100000, 999999))
-    otp_expiry = datetime.now(IST) + timedelta(minutes=10)
+    otp_expiry = datetime.now(IST) + timedelta(minutes=get_otp_expiry_minutes(role))
     coll.update_one(
         {"_id": user["_id"]},
         {"$set": {"otp_code": otp_code, "otp_expiry": otp_expiry}, "$unset": {"otp_attempts": ""}}
@@ -394,7 +426,7 @@ def khelomore_verify_otp(email, otp_code, iv, is_admin=False, role=""):
         except Exception:
             pass
 
-    token = generate_token(dec_email)
+    token = generate_token(dec_email, is_admin=is_admin, role=role)
     response_data = {
         "token":   token,
         "message": "Verification successful",
@@ -402,6 +434,7 @@ def khelomore_verify_otp(email, otp_code, iv, is_admin=False, role=""):
             "id":             str(user["_id"]),
             "email":          dec_email,
             "gamertag":       user.get("gamertag") or user.get("first_name", "PLAYER"),
+            "full_name":      user.get("full_name", ""),
             "rank":           user.get("rank", "Recruit PRO I"),
             "xp":             user.get("xp", 0),
             "auth_provider":  user.get("auth_provider", "traditional"),
@@ -457,7 +490,7 @@ def khelomore_google_auth(gmail, gamertag, iv, is_admin=False, role=""):
         except Exception:
             pass
 
-    token = generate_token(dec_email)
+    token = generate_token(dec_email, is_admin=is_admin, role=role)
     response_data = {
         "token":   token,
         "message": "Google login successful",
@@ -520,7 +553,11 @@ def khelomore_google_auth_code_verify(code: str, is_admin=False, role=""):
 
         email = idinfo['email'].strip().lower()
         first_name = idinfo.get('given_name', 'Player')
-        
+        # Google's ID token carries the real display name ("Harsh Patil") separately from
+        # given_name ("Harsh") — capture it so the frontend can show the person's actual
+        # name instead of the ALL_CAPS gamertag or falling back to their email address.
+        full_name = (idinfo.get('name') or '').strip()
+
         # derive a gamertag if new
         derived_gamertag = first_name.upper().replace(" ", "_")
 
@@ -540,6 +577,7 @@ def khelomore_google_auth_code_verify(code: str, is_admin=False, role=""):
         if is_new:
             result = coll.insert_one({
                 "gamertag":      derived_gamertag,
+                "full_name":     full_name,
                 "email":         email,
                 "auth_provider": "google",
                 "status":        "Active",
@@ -553,8 +591,13 @@ def khelomore_google_auth_code_verify(code: str, is_admin=False, role=""):
                 send_welcome_email(email, derived_gamertag)
             except Exception as e:
                 print(f"WELCOME EMAIL ERROR: {str(e)}")
+        elif full_name and user.get("full_name") != full_name:
+            # Backfills accounts created before full_name existed, and keeps it in sync if
+            # the person's Google display name changes — harmless to refresh on every login.
+            coll.update_one({"_id": user["_id"]}, {"$set": {"full_name": full_name}})
+            user["full_name"] = full_name
 
-        token = generate_token(email)
+        token = generate_token(email, is_admin=is_admin, role=role)
         response_data = {
             "token":   token,
             "message": "Google login successful",
@@ -563,6 +606,7 @@ def khelomore_google_auth_code_verify(code: str, is_admin=False, role=""):
                 "id":             str(user["_id"]),
                 "email":          email,
                 "gamertag":       user.get("gamertag") or derived_gamertag,
+                "full_name":      user.get("full_name") or full_name,
                 "rank":           user.get("rank", "Recruit PRO I"),
                 "xp":             user.get("xp", 0),
                 "auth_provider":  user.get("auth_provider", "google"),
@@ -618,6 +662,7 @@ def khelomore_update_phone(email, phone_encrypted, iv):
             "id":             str(updated_user["_id"]),
             "email":          updated_user.get("email"),
             "gamertag":       updated_user.get("gamertag"),
+            "full_name":      updated_user.get("full_name", ""),
             "rank":           updated_user.get("rank", "Recruit PRO I"),
             "xp":             updated_user.get("xp", 0),
             "auth_provider":  updated_user.get("auth_provider", "google"),

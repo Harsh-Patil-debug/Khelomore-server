@@ -2,9 +2,37 @@ import razorpay
 import razorpay.errors
 import uuid
 import logging
+from bson import ObjectId
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+
+def get_cafe_razorpay_credentials(cafe_doc):
+    """
+    Resolves which Razorpay account a cafe's booking payments should go through.
+
+    Returns (key_id, key_secret, used_platform_fallback). If the cafe owner has entered
+    their own Razorpay Key ID + Secret (cafe-command-center → Cafe Profile), payments go
+    straight to their own account. Otherwise this falls back to the platform's own
+    account (per product decision: bookings still work immediately for a cafe that
+    hasn't configured payments yet, and the platform settles that money to the owner
+    manually until they do) — used_platform_fallback tells the caller which happened, so
+    it can be recorded on the booking for that reconciliation.
+    """
+    key_id = cafe_doc.get("razorpay_key_id")
+    key_secret_enc = cafe_doc.get("razorpay_key_secret_enc")
+    if key_id and key_secret_enc:
+        try:
+            from .auth_handler import decrypt_secret_key
+            key_secret = decrypt_secret_key(key_secret_enc)
+            return key_id, key_secret, False
+        except Exception as e:
+            logger.error(f"[Razorpay] Failed to decrypt cafe {cafe_doc.get('_id')}'s key secret: {e}")
+
+    platform_key_id = getattr(settings, 'RAZORPAY_KEY_ID', '')
+    platform_key_secret = getattr(settings, 'RAZORPAY_KEY_SECRET', '')
+    return platform_key_id, platform_key_secret, True
 
 
 _used_payments_index_ensured = False
@@ -21,7 +49,7 @@ def _ensure_used_payments_index():
         _used_payments_index_ensured = True
 
 
-def verify_razorpay_payment(order_id, payment_id, signature, expected_amount_paise):
+def verify_razorpay_payment(order_id, payment_id, signature, expected_amount_paise, cafe_id=None):
     """
     Verifies a completed Razorpay payment server-side. Returns True only if ALL of:
       1. The signature is cryptographically valid for (order_id, payment_id).
@@ -34,9 +62,30 @@ def verify_razorpay_payment(order_id, payment_id, signature, expected_amount_pai
       3. This payment_id has not already been used for an earlier booking/registration
          (replay protection) — one payment may only ever unlock one booking.
     On success, atomically claims the payment_id so it can never be reused.
+
+    cafe_id is only passed by the per-cafe booking payment flow (see
+    create_cafe_booking_order_handler). When present, the credentials used to verify are
+    whichever ones actually created this order — looked up from cafe_payment_orders,
+    never trusted from the client — and the order is required to belong to that cafe, so
+    an order paid for at cafe A can never be replayed to unlock a booking at cafe B.
+    Callers that don't pass cafe_id (subscriptions, tournament registration) keep using
+    the platform's own account, unchanged.
     """
     key_id = getattr(settings, 'RAZORPAY_KEY_ID', '')
     key_secret = getattr(settings, 'RAZORPAY_KEY_SECRET', '')
+
+    if cafe_id is not None:
+        from .db_connection import db_main
+        order_record = db_main.cafe_payment_orders.find_one({"order_id": order_id, "cafe_id": str(cafe_id)})
+        if not order_record:
+            logger.warning(f"[Razorpay] No order record for order {order_id} under cafe {cafe_id} — rejecting.")
+            return False
+        if not order_record.get("used_platform_fallback"):
+            cafe = db_main.cafes.find_one({"_id": ObjectId(cafe_id)}) if ObjectId.is_valid(str(cafe_id)) else None
+            if not cafe:
+                return False
+            key_id, key_secret, _ = get_cafe_razorpay_credentials(cafe)
+
     if not key_id or not key_secret:
         logger.warning("[Razorpay] Missing credentials — cannot verify payment signature.")
         return False
@@ -94,13 +143,19 @@ def verify_razorpay_payment(order_id, payment_id, signature, expected_amount_pai
 
     return True
 
-def create_razorpay_order_handler(amount_in_inr):
+def create_razorpay_order_handler(amount_in_inr, key_id=None, key_secret=None):
     """
     Creates a real Razorpay Order using Razorpay API credentials.
     Converts INR amount to Paise (e.g. 100 INR = 10000 Paise).
+
+    key_id/key_secret default to the platform's own account (subscriptions, tournament
+    registration) — the per-cafe booking flow passes a specific cafe's own credentials
+    (or the platform's, as a fallback) instead. See create_cafe_booking_order_handler.
     """
-    key_id = getattr(settings, 'RAZORPAY_KEY_ID', '')
-    key_secret = getattr(settings, 'RAZORPAY_KEY_SECRET', '')
+    if key_id is None:
+        key_id = getattr(settings, 'RAZORPAY_KEY_ID', '')
+    if key_secret is None:
+        key_secret = getattr(settings, 'RAZORPAY_KEY_SECRET', '')
 
     amount_in_paise = int(float(amount_in_inr) * 100)
     receipt_id = f"rcpt_{uuid.uuid4().hex[:10]}"
@@ -145,3 +200,36 @@ def create_razorpay_order_handler(amount_in_inr):
             "error_msg": str(e),
             "is_mock": True
         }
+
+
+def create_cafe_booking_order_handler(cafe_id, amount_in_inr):
+    """
+    Creates a Razorpay order for a booking at a specific cafe, using that cafe's own
+    Razorpay account if the owner has configured one (cafe-command-center → Cafe
+    Profile), or the platform's account as a fallback otherwise.
+
+    Records which account was used, keyed by order_id, in cafe_payment_orders — this is
+    the source of truth verify_razorpay_payment consults later (never the client), and
+    lets bookings_handler stamp "settled directly to cafe" vs "held by platform, needs
+    manual payout" onto the resulting booking.
+    """
+    from .db_connection import db_main
+    if not ObjectId.is_valid(str(cafe_id)):
+        return {"status": "error", "message": "Invalid cafe id."}
+    cafe = db_main.cafes.find_one({"_id": ObjectId(cafe_id)})
+    if not cafe:
+        return {"status": "error", "message": "Cafe not found."}
+
+    key_id, key_secret, used_platform_fallback = get_cafe_razorpay_credentials(cafe)
+    order = create_razorpay_order_handler(amount_in_inr, key_id, key_secret)
+
+    if not order.get("is_mock") and order.get("id"):
+        db_main.cafe_payment_orders.insert_one({
+            "order_id": order["id"],
+            "cafe_id": str(cafe_id),
+            "used_platform_fallback": used_platform_fallback,
+        })
+
+    order["key_id"] = key_id
+    order["used_platform_fallback"] = used_platform_fallback
+    return order

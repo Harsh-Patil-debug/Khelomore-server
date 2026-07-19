@@ -21,6 +21,19 @@ urlpatterns = [
     path('cafes/parse-maps-url/', CafeParseMapsUrlView.as_view(), name='parse_maps_url'),
     path('cafes/<str:cafe_id>/', CafeDetailView.as_view(), name='cafe_detail'),
     path('cafes/<str:cafe_id>/restore/', CafeRestoreView.as_view(), name='cafe_restore'),
+    path('cafes/<str:cafe_id>/razorpay-credentials/', CafeRazorpayCredentialsView.as_view(), name='cafe_razorpay_credentials'),
+    path('cafes/<str:cafe_id>/razorpay-credentials/password-status/', CafeRazorpayPasswordStatusView.as_view(), name='cafe_razorpay_password_status'),
+    path('cafes/<str:cafe_id>/razorpay-credentials/set-password/', CafeRazorpayPasswordSetView.as_view(), name='cafe_razorpay_password_set'),
+    path('cafes/<str:cafe_id>/razorpay-credentials/verify-password/', CafeRazorpayPasswordVerifyView.as_view(), name='cafe_razorpay_password_verify'),
+    path('cafes/<str:cafe_id>/payments/create-order/', CafeBookingOrderCreateView.as_view(), name='cafe_booking_order_create'),
+
+    # ── Subscriptions (₹1500/month cafe-owner platform fee) ──────────────────────
+    path('cafes/<str:cafe_id>/subscription/', CafeSubscriptionDetailView.as_view(), name='cafe_subscription'),
+    path('cafes/<str:cafe_id>/subscription/create-order/', CafeSubscriptionOrderView.as_view(), name='cafe_subscription_order'),
+    path('cafes/<str:cafe_id>/subscription/trial-welcome-shown/', CafeSubscriptionTrialWelcomeShownView.as_view(), name='cafe_subscription_trial_welcome_shown'),
+    path('cafes/<str:cafe_id>/subscription/verify/', CafeSubscriptionVerifyView.as_view(), name='cafe_subscription_verify'),
+    path('subscriptions/', SubscriptionsListView.as_view(), name='subscriptions_list'),
+    path('subscriptions/<str:cafe_id>/mark-paid/', SubscriptionMarkPaidView.as_view(), name='subscription_mark_paid'),
 
     # ── Tournaments ───────────────────────────────────────────────────────────
     path('tournaments/', TournamentListCreateView.as_view(), name='tournaments'),

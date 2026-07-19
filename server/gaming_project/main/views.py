@@ -12,7 +12,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.throttling import ScopedRateThrottle
-from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, auth_handler, bookings_handler, auth_middleware, favorites, sessions, offers, users, partner_applications
+from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, auth_handler, bookings_handler, auth_middleware, favorites, sessions, offers, users, partner_applications, subscriptions
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
@@ -101,12 +101,19 @@ class CafeMyListView(APIView):
 
 
 class CafeParseMapsUrlView(APIView):
-    """GET /cafes/parse-maps-url/?url=... — Resolves and parses a Google Maps link (CORS safe)"""
-    def get(self, request):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
-        if error_response:
-            return error_response
+    """
+    GET /cafes/parse-maps-url/?url=... — Resolves and parses a Google Maps link (CORS safe).
+    Public/unauthenticated — used by both playhub-command's "Add Gaming Cafe" form and the
+    public "Partner Application" form on gaming-cafe-connect, which has no admin session to
+    authenticate with. Safe to expose: it's a stateless, read-only utility (no DB access),
+    and parse_google_maps_url_handler only ever follows a redirect when the URL's hostname
+    is actually Google's own shortener domain — see the SECURITY comment there. Rate-limited
+    via ScopedRateThrottle below since it makes an outbound network call per request.
+    """
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "geo"
 
+    def get(self, request):
         url = request.query_params.get("url")
         if not url:
             return Response({"status": "error", "message": "Missing 'url' parameter"}, status=status.HTTP_400_BAD_REQUEST)
@@ -168,13 +175,14 @@ class KheloMoreRegisterView(APIView):
         if guard_error:
             return guard_error
         result, status_code = auth_handler.khelomore_register(
-            gamertag = data.get("gamertag", ""),
-            email    = data.get("email", ""),
-            password = data.get("password", ""),
-            iv       = data.get("iv", ""),
-            phone    = data.get("phone", ""),
-            is_admin = check_is_admin(request),
-            role     = role,
+            gamertag          = data.get("gamertag", ""),
+            email             = data.get("email", ""),
+            password          = data.get("password", ""),
+            iv                = data.get("iv", ""),
+            phone             = data.get("phone", ""),
+            is_admin          = check_is_admin(request),
+            role              = role,
+            razorpay_password = data.get("razorpay_password", ""),
         )
         return Response(result, status=status_code)
 
@@ -241,6 +249,15 @@ class KheloMoreVerifyOTPView(APIView):
                     cookie_key = "km_super_admin_token"
                 elif user_role == "admin" or role == "admin" or check_is_admin(request):
                     cookie_key = "km_admin_token"
+                elif user_role == "website_user" or role == "website_user":
+                    # Must NOT reuse km_gamer_token here — that name is also used for the
+                    # mobile app's role="user" sessions, and /auth/me/'s cookie-based
+                    # lookup-order heuristic uses the cookie's presence/name to decide
+                    # which collection to check first. Sharing the name meant a website
+                    # session could get misidentified as a mobile session and resolve
+                    # against the wrong (db.users) account if one happens to exist under
+                    # the same email — silently losing that account's saved phone number.
+                    cookie_key = "km_website_token"
                 else:
                     cookie_key = "km_gamer_token"
 
@@ -323,14 +340,14 @@ class KheloMoreResendOTPView(APIView):
         if prev_expiry:
             if prev_expiry.tzinfo is None:
                 prev_expiry = prev_expiry.replace(tzinfo=timezone.utc).astimezone(auth_handler.IST)
-            last_sent = prev_expiry - timedelta(minutes=10)
+            last_sent = prev_expiry - timedelta(minutes=auth_handler.get_otp_expiry_minutes(role))
             elapsed = (datetime.now(auth_handler.IST) - last_sent).total_seconds()
             if elapsed < auth_handler.OTP_RESEND_COOLDOWN_SECONDS:
                 wait_for = int(auth_handler.OTP_RESEND_COOLDOWN_SECONDS - elapsed)
                 return Response({"error": f"Please wait {wait_for}s before requesting another code."}, status=429)
 
         otp_code   = str(random.randint(100000, 999999))
-        otp_expiry = datetime.now(auth_handler.IST) + timedelta(minutes=10)
+        otp_expiry = datetime.now(auth_handler.IST) + timedelta(minutes=auth_handler.get_otp_expiry_minutes(role))
         coll.update_one(
             {"_id": user["_id"]},
             {"$set": {"otp_code": otp_code, "otp_expiry": otp_expiry}, "$unset": {"otp_attempts": ""}}
@@ -435,8 +452,13 @@ class KheloMoreGoogleCallbackView(APIView):
                         parsed = json.loads(decrypted)
                         token = parsed.get("token")
                         if token:
+                            # role is always "website_user" here (mobile is handled by the
+                            # `if is_mobile` branch above) — km_website_token, not
+                            # km_gamer_token, so /auth/me/'s lookup order can tell this
+                            # apart from a mobile-app gamer session. See the matching
+                            # comment in KheloMoreVerifyOTPView for the bug this caused.
                             response_obj.set_cookie(
-                                key='km_gamer_token',
+                                key='km_website_token',
                                 value=token,
                                 httponly=True,
                                 secure=True,
@@ -444,7 +466,7 @@ class KheloMoreGoogleCallbackView(APIView):
                                 max_age=30 * 24 * 3600,
                             )
                     except Exception as e:
-                        print(f"[COOKIE ERROR] Failed to set Google km_gamer_token cookie: {e}")
+                        print(f"[COOKIE ERROR] Failed to set Google km_website_token cookie: {e}")
 
                 return response_obj
             
@@ -568,7 +590,14 @@ class TournamentListCreateView(APIView):
 
 
     def post(self, request):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        # A cafe owner creates tournaments for their own cafe from cafe-command-center —
+        # not just super admins from playhub-command. Mirrors TournamentDetailView.get's
+        # existing cafe-owner-or-super-admin pattern.
+        cafe_id = request.data.get("cafe_id") or request.data.get("cafeId")
+        if cafe_id:
+            email, error_response = authenticate_admin_owner(request, cafe_id)
+        else:
+            email, error_response = auth_middleware.authenticate_super_admin_request(request)
         if error_response:
             return error_response
         response = tournaments.create_tournament_handler(request.data, request.FILES)
@@ -607,18 +636,48 @@ class TournamentDetailView(APIView):
         return Response(result, status=status_code)
 
     def patch(self, request, tournament_id):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        # Same cafe-owner-or-super-admin rule as GET above — a cafe owner must be able to
+        # start/end/revert/edit/cancel their own tournament from cafe-command-center.
+        from .Handlers.db_connection import get_db
+        from .Handlers.tournaments import safe_object_id
+        db = get_db()
+        if not db:
+            return Response({"status": "error", "message": "Database offline"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        tournament = db.tournaments.find_one({"_id": safe_object_id(tournament_id)})
+        if not tournament:
+            return Response({"status": "error", "message": "Tournament not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        cafe_id = tournament.get("cafe_id")
+        if cafe_id:
+            email, error_response = authenticate_admin_owner(request, cafe_id)
+        else:
+            email, error_response = auth_middleware.authenticate_super_admin_request(request)
         if error_response:
             return error_response
+
         response = tournaments.update_tournament_handler(tournament_id, request.data, request.FILES)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)
 
     def delete(self, request, tournament_id):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        from .Handlers.db_connection import get_db
+        from .Handlers.tournaments import safe_object_id
+        db = get_db()
+        if not db:
+            return Response({"status": "error", "message": "Database offline"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        tournament = db.tournaments.find_one({"_id": safe_object_id(tournament_id)})
+        if not tournament:
+            return Response({"status": "error", "message": "Tournament not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        cafe_id = tournament.get("cafe_id")
+        if cafe_id:
+            email, error_response = authenticate_admin_owner(request, cafe_id)
+        else:
+            email, error_response = auth_middleware.authenticate_super_admin_request(request)
         if error_response:
             return error_response
+
         response = tournaments.delete_tournament_handler(tournament_id)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
@@ -677,7 +736,13 @@ class RigListCreateView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
     def post(self, request):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        # A cafe owner manages their own systems from cafe-command-center — not just
+        # super admins from playhub-command. Same pattern as tournaments above.
+        cafe_id = request.data.get("cafe_id") or request.data.get("cafeId")
+        if cafe_id:
+            email, error_response = authenticate_admin_owner(request, cafe_id)
+        else:
+            email, error_response = auth_middleware.authenticate_super_admin_request(request)
         if error_response:
             return error_response
         response = rigs.create_rig_handler(request.data)
@@ -694,8 +759,22 @@ class RigDetailView(APIView):
             return Response(response, status=status.HTTP_404_NOT_FOUND)
         return Response(response, status=status.HTTP_200_OK)
 
+    def _authenticate_for_rig(self, request, rig_id):
+        from .Handlers.db_connection import get_db
+        from bson import ObjectId
+        db = get_db()
+        if not db:
+            return None, Response({"status": "error", "message": "Database offline"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        rig = db.rigs.find_one({"_id": ObjectId(rig_id)}) if ObjectId.is_valid(rig_id) else None
+        if not rig:
+            return None, Response({"status": "error", "message": "Rig not found."}, status=status.HTTP_404_NOT_FOUND)
+        cafe_id = rig.get("cafe_id")
+        if cafe_id:
+            return authenticate_admin_owner(request, cafe_id)
+        return auth_middleware.authenticate_super_admin_request(request)
+
     def put(self, request, rig_id):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        email, error_response = self._authenticate_for_rig(request, rig_id)
         if error_response:
             return error_response
         response = rigs.update_rig_handler(rig_id, request.data)
@@ -704,7 +783,7 @@ class RigDetailView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
     def delete(self, request, rig_id):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        email, error_response = self._authenticate_for_rig(request, rig_id)
         if error_response:
             return error_response
         response = rigs.delete_rig_handler(rig_id)
@@ -716,7 +795,19 @@ class RigDetailView(APIView):
 class RigReserveView(APIView):
     """POST /rigs/<id>/reserve/ — Create an admin reservation for specific slots."""
     def post(self, request, rig_id):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        from .Handlers.db_connection import get_db
+        from bson import ObjectId
+        db = get_db()
+        if not db:
+            return Response({"status": "error", "message": "Database offline"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        rig = db.rigs.find_one({"_id": ObjectId(rig_id)}) if ObjectId.is_valid(rig_id) else None
+        if not rig:
+            return Response({"status": "error", "message": "Rig not found."}, status=status.HTTP_404_NOT_FOUND)
+        cafe_id = rig.get("cafe_id")
+        if cafe_id:
+            email, error_response = authenticate_admin_owner(request, cafe_id)
+        else:
+            email, error_response = auth_middleware.authenticate_super_admin_request(request)
         if error_response:
             return error_response
         response = rigs.reserve_rig_slots_handler(rig_id, request.data)
@@ -734,7 +825,9 @@ class CafeDetailView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
     def put(self, request, cafe_id):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        # A cafe owner edits their own Cafe Profile page from cafe-command-center — not
+        # just super admins from playhub-command. Same pattern as tournaments/rigs/offers.
+        email, error_response = authenticate_admin_owner(request, cafe_id)
         if error_response:
             return error_response
         response = cafes.update_cafe_handler(cafe_id, request.data)
@@ -743,6 +836,8 @@ class CafeDetailView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
     def delete(self, request, cafe_id):
+        # Cafe removal/soft-delete stays super-admin-only — cafe-command-center never
+        # calls this; it's a platform lifecycle action, not routine self-service.
         email, error_response = auth_middleware.authenticate_super_admin_request(request)
         if error_response:
             return error_response
@@ -762,6 +857,185 @@ class CafeRestoreView(APIView):
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)
+
+
+class CafeSubscriptionDetailView(APIView):
+    """GET /cafes/<cafe_id>/subscription/ — Current status + payment history (owner or super admin)."""
+    def get(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        response, status_code = subscriptions.get_cafe_subscription_handler(cafe_id)
+        return Response(response, status=status_code)
+
+
+class CafeSubscriptionOrderView(APIView):
+    """POST /cafes/<cafe_id>/subscription/create-order/ — Create a ₹1599 Razorpay order for this cafe's next payment."""
+    def post(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        response, status_code = subscriptions.create_subscription_order_handler(cafe_id)
+        return Response(response, status=status_code)
+
+
+class CafeSubscriptionTrialWelcomeShownView(APIView):
+    """POST /cafes/<cafe_id>/subscription/trial-welcome-shown/ — Marks the one-time "welcome to your free trial" popup as seen, so it never shows again for this cafe."""
+    def post(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        response, status_code = subscriptions.mark_trial_welcome_shown_handler(cafe_id)
+        return Response(response, status=status_code)
+
+
+class CafeSubscriptionVerifyView(APIView):
+    """POST /cafes/<cafe_id>/subscription/verify/ — Verify the Razorpay payment and extend the due date."""
+    def post(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        data = request.data
+        response, status_code = subscriptions.verify_subscription_payment_handler(
+            cafe_id,
+            data.get("razorpay_order_id", ""),
+            data.get("razorpay_payment_id", ""),
+            data.get("razorpay_signature", ""),
+        )
+        return Response(response, status=status_code)
+
+
+class CafeRazorpayCredentialsView(APIView):
+    """
+    GET/PUT/DELETE /cafes/<cafe_id>/razorpay-credentials/ — the cafe owner's own Razorpay
+    account for booking payments (owner or super admin only). PUT never echoes the secret
+    back; GET only ever returns whether it's configured + the key_id.
+    """
+    def get(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        response = cafes.get_razorpay_credentials_status_handler(cafe_id)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+    def put(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        data = request.data
+        # SECURITY: the "locked until you enter your Razorpay password" gate in
+        # cafe-command-center is only real if the save itself re-checks it — otherwise
+        # it's a UI nicety a direct API call bypasses entirely. Same password gate as
+        # CafeRazorpayPasswordVerifyView below.
+        gate = cafes.verify_razorpay_password_handler(cafe_id, (email or "").strip().lower(), data.get("razorpay_password", ""))
+        if gate.get("status") == "error":
+            return Response(gate, status=status.HTTP_403_FORBIDDEN)
+        response = cafes.save_razorpay_credentials_handler(
+            cafe_id, data.get("key_id"), data.get("key_secret")
+        )
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+    def delete(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        data = request.data
+        gate = cafes.verify_razorpay_password_handler(cafe_id, (email or "").strip().lower(), data.get("razorpay_password", ""))
+        if gate.get("status") == "error":
+            return Response(gate, status=status.HTTP_403_FORBIDDEN)
+        response = cafes.delete_razorpay_credentials_handler(cafe_id)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class CafeRazorpayPasswordStatusView(APIView):
+    """GET /cafes/<cafe_id>/razorpay-credentials/password-status/ — whether the owner has set a Razorpay password yet."""
+    def get(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        response = cafes.get_razorpay_password_status_handler(cafe_id, (email or "").strip().lower())
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class CafeRazorpayPasswordSetView(APIView):
+    """POST /cafes/<cafe_id>/razorpay-credentials/set-password/ — first-time-only setup for an account that predates this feature."""
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    def post(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        response = cafes.set_razorpay_password_handler(cafe_id, (email or "").strip().lower(), request.data.get("password", ""))
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class CafeRazorpayPasswordVerifyView(APIView):
+    """POST /cafes/<cafe_id>/razorpay-credentials/verify-password/ — unlocks the credential fields in the UI."""
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    def post(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        response = cafes.verify_razorpay_password_handler(cafe_id, (email or "").strip().lower(), request.data.get("password", ""))
+        if response.get("status") == "error":
+            error_status = status.HTTP_400_BAD_REQUEST if response.get("needs_setup") else status.HTTP_403_FORBIDDEN
+            return Response(response, status=error_status)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class CafeBookingOrderCreateView(APIView):
+    """
+    POST /cafes/<cafe_id>/payments/create-order/ — Create a Razorpay order for any
+    customer-facing payment at this specific cafe (slot booking, paid tournament entry),
+    routed to the cafe owner's own Razorpay account if they've configured one, or the
+    platform account as a fallback. Called by the customer (any logged-in user), not the
+    cafe owner — unlike the other cafes/<id>/... endpoints above.
+    """
+    def post(self, request, cafe_id):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+
+        amount = request.data.get("amount")
+        if amount is None:
+            return Response({"status": "error", "message": "Missing 'amount' parameter"}, status=status.HTTP_400_BAD_REQUEST)
+        response = payments.create_cafe_booking_order_handler(cafe_id, amount)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class SubscriptionsListView(APIView):
+    """GET /subscriptions/ — Every cafe's subscription status (Super Admin only)."""
+    def get(self, request):
+        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        if error_response:
+            return error_response
+        response, status_code = subscriptions.get_all_subscriptions_handler()
+        return Response(response, status=status_code)
+
+
+class SubscriptionMarkPaidView(APIView):
+    """POST /subscriptions/<cafe_id>/mark-paid/ — Manually record a payment collected outside the app (Super Admin only)."""
+    def post(self, request, cafe_id):
+        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        if error_response:
+            return error_response
+        response, status_code = subscriptions.mark_subscription_paid_manually_handler(cafe_id, email or "super_admin")
+        return Response(response, status=status_code)
 
 
 class BookingDetailView(APIView):
@@ -997,15 +1271,24 @@ class SessionActionView(APIView):
 class OfferListCreateView(APIView):
     """GET /offers/?cafe_id=<id> — list (admin), POST /offers/ — create (admin)"""
     def get(self, request):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        # A cafe owner manages their own offers from cafe-command-center — not just
+        # super admins from playhub-command. Same pattern as tournaments/rigs above.
+        cafe_id = request.query_params.get("cafe_id")
+        if cafe_id:
+            email, error_response = authenticate_admin_owner(request, cafe_id)
+        else:
+            email, error_response = auth_middleware.authenticate_super_admin_request(request)
         if error_response:
             return error_response
-        cafe_id = request.query_params.get("cafe_id")
         result, status_code = offers.get_offers_handler(cafe_id=cafe_id)
         return Response(result, status=status_code)
 
     def post(self, request):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        cafe_id = request.data.get("cafe_id") or request.data.get("cafeId")
+        if cafe_id:
+            email, error_response = authenticate_admin_owner(request, cafe_id)
+        else:
+            email, error_response = auth_middleware.authenticate_super_admin_request(request)
         if error_response:
             return error_response
         result, status_code = offers.create_offer_handler(request.data)
@@ -1014,15 +1297,30 @@ class OfferListCreateView(APIView):
 
 class OfferDetailView(APIView):
     """PATCH /offers/<offer_id>/ — toggle/update, DELETE /offers/<offer_id>/ — delete (admin)"""
+
+    def _authenticate_for_offer(self, request, offer_id):
+        from .Handlers.db_connection import get_db
+        from bson import ObjectId
+        db = get_db()
+        if not db:
+            return None, Response({"status": "error", "message": "Database offline"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        offer = db.offers.find_one({"_id": ObjectId(offer_id)}) if ObjectId.is_valid(offer_id) else None
+        if not offer:
+            return None, Response({"status": "error", "message": "Offer not found."}, status=status.HTTP_404_NOT_FOUND)
+        cafe_id = offer.get("cafe_id")
+        if cafe_id:
+            return authenticate_admin_owner(request, cafe_id)
+        return auth_middleware.authenticate_super_admin_request(request)
+
     def patch(self, request, offer_id):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        email, error_response = self._authenticate_for_offer(request, offer_id)
         if error_response:
             return error_response
         result, status_code = offers.update_offer_handler(offer_id, request.data)
         return Response(result, status=status_code)
 
     def delete(self, request, offer_id):
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        email, error_response = self._authenticate_for_offer(request, offer_id)
         if error_response:
             return error_response
         result, status_code = offers.delete_offer_handler(offer_id)
@@ -1073,7 +1371,7 @@ class KheloMoreLogoutView(APIView):
         if auth_header and auth_header.startswith('Bearer '):
             token = auth_header.split(' ')[1].strip()
         else:
-            for cookie_name in ('km_gamer_token', 'km_admin_token', 'km_super_admin_token'):
+            for cookie_name in ('km_gamer_token', 'km_website_token', 'km_admin_token', 'km_super_admin_token'):
                 token = request.COOKIES.get(cookie_name)
                 if token:
                     break
@@ -1085,7 +1383,7 @@ class KheloMoreLogoutView(APIView):
                 print(f"[LOGOUT] Token revocation failed: {e}")
 
         response_obj = Response({"message": "Logout successful"}, status=status.HTTP_200_OK)
-        for cookie_name in ('km_gamer_token', 'km_admin_token', 'km_super_admin_token'):
+        for cookie_name in ('km_gamer_token', 'km_website_token', 'km_admin_token', 'km_super_admin_token'):
             response_obj.set_cookie(
                 key=cookie_name,
                 value='',
@@ -1117,6 +1415,8 @@ class KheloMoreMeView(APIView):
         # no such hint.
         if request.COOKIES.get('km_admin_token'):
             lookup_order = [(db_main.admins, "admin"), (db_main.website_users, "website_user"), (db_main.users, "user")]
+        elif request.COOKIES.get('km_website_token'):
+            lookup_order = [(db_main.website_users, "website_user"), (db_main.users, "user"), (db_main.admins, "admin")]
         elif request.COOKIES.get('km_gamer_token'):
             lookup_order = [(db_main.users, "user"), (db_main.website_users, "website_user"), (db_main.admins, "admin")]
         else:
@@ -1139,6 +1439,7 @@ class KheloMoreMeView(APIView):
             "id":             str(user["_id"]),
             "email":          email,
             "gamertag":       user.get("gamertag") or user.get("first_name", "PLAYER"),
+            "full_name":      user.get("full_name", ""),
             "rank":           user.get("rank", "Recruit PRO I"),
             "xp":             user.get("xp", 0),
             "role":           user.get("role", role),
