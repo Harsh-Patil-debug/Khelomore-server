@@ -14,6 +14,14 @@ gunicorn==21.2.0
 
 # ── MongoDB ───────────────────────────────────
 pymongo==3.11.4
+# pymongo needs dnspython at runtime to resolve mongodb+srv:// URIs (MongoDB Atlas's
+# standard connection string format) — it's never imported directly by app code, only
+# by pymongo internally when it sees the srv:// scheme, so a static import audit of
+# gaming_project.main won't catch it missing. Confirmed live on Render: without it,
+# every DB-touching request 500s with "The dnspython module must be installed to use
+# mongodb+srv:// URIs" — it only worked in local dev because dnspython happened to
+# already be installed from something else, undeclared.
+dnspython==2.7.0
 
 # ── Auth / crypto ─────────────────────────────
 PyJWT==2.10.1
