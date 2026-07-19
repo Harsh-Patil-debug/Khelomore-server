@@ -29,6 +29,11 @@ argon2-cffi==25.1.0
 pycryptodome==3.21.0
 pyotp==2.9.0
 qrcode==8.2
+# qrcode's default image factory (used by auth_handler.py's TOTP QR generation —
+# qr.make_image(...).save(buffer, format="PNG")) is backed by Pillow. Nothing imports
+# PIL directly, so this is invisible to any static import scan too, and only fails at
+# the moment someone actually triggers QR generation, not at app startup.
+Pillow==11.2.1
 
 # ── Google Sign-In ────────────────────────────
 # Only google.oauth2.id_token / google.auth.transport.requests are used (verifying an
