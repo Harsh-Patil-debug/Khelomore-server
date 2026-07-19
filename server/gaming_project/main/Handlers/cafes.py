@@ -278,6 +278,7 @@ def map_cafe_doc(doc, user_lat=None, user_lon=None, public=False):
         "city": doc.get("city", ""),
         "phone": doc.get("phone", ""),
         "is_deleted": doc.get("is_deleted", False),
+        "status": doc.get("status", "active"),
 
         # Profile specific fields
         "banner_url": doc.get("banner_url") or (images_list[0] if images_list else ""),
@@ -810,6 +811,16 @@ def update_cafe_handler(cafe_id, data):
                 if err:
                     return {"status": "error", "message": err}
             update_fields["message"] = data["message"]
+        if "status" in data:
+            # Same status vocabulary the super admin panel's badge already renders
+            # (statusBadge in cafes.tsx) — this field never had backend handling at all
+            # before, so "Suspend Hub"/"Activate Hub" silently 400'd on every click.
+            enum_error = input_validation.validate_enum(
+                data["status"], {"active", "pending", "suspended", "rejected"}, "Status"
+            )
+            if enum_error:
+                return {"status": "error", "message": enum_error}
+            update_fields["status"] = data["status"]
 
         if not update_fields:
             return {"status": "error", "message": "No valid fields to update."}
