@@ -17,9 +17,9 @@ _OPTIONAL_FIELDS = [
     "latitude", "longitude", "specs", "imageUrl",
 ]
 
-# Public, unauthenticated form — cap how many photos a single submission can attach so this
-# endpoint can't be used to force unbounded Cloudinary uploads.
-_MAX_PHOTOS = 10
+# Public, unauthenticated form — cap how many photos a single submission can attach. Also
+# matches the gamer app's cafe-detail slider, which only ever shows up to 3 photos.
+_MAX_PHOTOS = 3
 
 
 def get_partner_applications_handler():

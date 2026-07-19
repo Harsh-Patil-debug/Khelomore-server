@@ -24,6 +24,7 @@ def _map_offer(doc):
         "start_date": doc.get("start_date", ""),
         "end_date": doc.get("end_date", ""),
         "is_active": doc.get("is_active", True),
+        "is_deleted": doc.get("is_deleted", False),
         "created_at": doc.get("created_at", ""),
     }
 
@@ -58,6 +59,7 @@ def get_active_offers_handler(cafe_id=None):
         today_str = now_ist.strftime("%Y-%m-%d")   # e.g. "2026-07-02"
         query = {
             "is_active": True,
+            "is_deleted": {"$ne": True},
             "start_date": {"$lte": today_str},
             "end_date":   {"$gte": today_str},
         }
@@ -108,6 +110,7 @@ def create_offer_handler(data):
             "start_date": start_date,
             "end_date": end_date,
             "is_active": is_active,
+            "is_deleted": False,
             "created_at": datetime.now(IST).isoformat(),
         }
         result = db.offers.insert_one(doc)
@@ -131,6 +134,9 @@ def update_offer_handler(offer_id, data):
         if "is_active" in data:
             val = data["is_active"]
             update["is_active"] = (val is True or str(val).lower() == "true")
+        if "is_deleted" in data:
+            val = data["is_deleted"]
+            update["is_deleted"] = (val is True or str(val).lower() == "true")
         if "name" in data:
             update["name"] = data["name"]
         if "discount_pct" in data:

@@ -222,7 +222,10 @@ def create_rig_handler(data):
         return {"status": "error", "message": "MongoDB connection is not established."}
 
     try:
-        rig_type_raw = str(data.get("type", "PC")).upper()
+        # .strip() matters now that the admin panel lets an owner type a brand-new
+        # category freely — stray whitespace would otherwise silently create a
+        # near-duplicate category (e.g. "PS5" vs "PS5 ") that looks identical in the UI.
+        rig_type_raw = str(data.get("type", "PC")).strip().upper()
         if rig_type_raw == "RACING_SIM":
             rig_type = "Racing Sim"
         elif rig_type_raw == "VR":
@@ -306,7 +309,7 @@ def update_rig_handler(rig_id, data):
         # Fields allowed to update
         update_fields = {}
         if "type" in data:
-            rt = str(data["type"]).upper()
+            rt = str(data["type"]).strip().upper()
             if rt == "RACING_SIM":
                 update_fields["type"] = "Racing Sim"
             elif rt == "VR":

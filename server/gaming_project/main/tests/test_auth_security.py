@@ -332,3 +332,44 @@ class AdminTokenAuthTests(SecurityTestCase):
     def test_missing_auth_is_rejected(self):
         resp = self.client.get("/api/v1/main/db/")
         self.assertEqual(resp.status_code, 401)
+
+
+class SuperAdminOtpExpiryTests(SecurityTestCase):
+    """
+    Super admin login/signup OTPs must expire in 2 minutes, not the platform-wide 10 —
+    the super admin panel is the most sensitive login surface, so a leaked/intercepted
+    code should have a much smaller usable window than a gamer-app or website OTP.
+    """
+
+    def test_super_admin_login_otp_expires_in_two_minutes(self):
+        email = self.unique_email("superadmin-otp")
+        self.make_active_user(email=email, role="super_admin", collection="super_admin", password="CorrectHorseBattery1")
+
+        email_enc, password_enc, iv = self.encrypt_with_shared_iv(email, "CorrectHorseBattery1")
+        result, code = auth_handler.khelomore_login(email_enc, password_enc, iv, role="super_admin")
+        self.assertEqual(code, 200)
+
+        user = self.db.super_admin.find_one({"email": email})
+        expiry = user["otp_expiry"]
+        from datetime import datetime, timezone as tz
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=tz.utc).astimezone(auth_handler.IST)
+        remaining = (expiry - datetime.now(auth_handler.IST)).total_seconds()
+        # Allow a little slack for test execution time, but this must be nowhere near 10
+        # minutes — that would mean the role-based shortening isn't actually being applied.
+        self.assertTrue(60 < remaining <= 125, f"expected ~2 minutes remaining, got {remaining}s")
+
+    def test_regular_user_otp_still_gets_the_full_ten_minutes(self):
+        email = self.unique_email("regular-otp")
+        self.make_active_user(email=email, password="CorrectHorseBattery1")
+
+        email_enc, password_enc, iv = self.encrypt_with_shared_iv(email, "CorrectHorseBattery1")
+        auth_handler.khelomore_login(email_enc, password_enc, iv, role="user")
+
+        user = self.db.users.find_one({"email": email})
+        expiry = user["otp_expiry"]
+        from datetime import datetime, timezone as tz
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=tz.utc).astimezone(auth_handler.IST)
+        remaining = (expiry - datetime.now(auth_handler.IST)).total_seconds()
+        self.assertTrue(remaining > 300, f"expected ~10 minutes remaining for a non-super-admin role, got {remaining}s")
