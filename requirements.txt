@@ -27,6 +27,12 @@ google-auth==2.37.0
 google-auth-oauthlib==1.2.1
 
 # ── Payments ───────────────────────────────────
+# razorpay's client imports pkg_resources (part of setuptools) at module load time, using
+# the old pre-importlib.metadata API. Newer Python/pip no longer bundle setuptools into a
+# fresh venv by default, so without an explicit dependency here the import crashes with
+# "ModuleNotFoundError: No module named 'pkg_resources'" the moment anything touches
+# payments.py — confirmed on Render's Python 3.14 default image.
+setuptools
 razorpay==1.4.2
 
 # ── Media uploads ──────────────────────────────
