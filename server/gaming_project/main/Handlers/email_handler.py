@@ -1,52 +1,66 @@
 """
 KheloMore Gaming Hub — Email Handler
 ──────────────────────────────────────────────────────────────────────────────
-Sends OTP and welcome emails via Gmail SMTP.
-Credentials sourced from .env: EMAIL_HOST_USER / EMAIL_HOST_PASSWORD
+Sends OTP and welcome emails via Brevo's HTTP transactional email API.
+
+Not raw SMTP: Render silently black-holes outbound SMTP connections instead of
+refusing them, so smtplib.SMTP(...) hung forever regardless of any timeout
+passed to it, taking down the gunicorn worker on every login (confirmed live —
+WORKER TIMEOUT -> SIGKILL). An HTTPS API call behaves like any other outbound
+request Render already handles fine, and fails fast/cleanly if Brevo is down.
+
+Credentials sourced from .env: BREVO_API_KEY / EMAIL_HOST_USER (the sender
+address — must be verified as a "sender" in the Brevo dashboard first).
 """
 
 import os
-import smtplib
-import random
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import requests
+from email.utils import parseaddr
 from dotenv import load_dotenv
 from django.conf import settings
 
 load_dotenv()
 
-SMTP_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("EMAIL_PORT", 587))
-SMTP_USER = os.getenv("EMAIL_HOST_USER", "")
-SMTP_PASS = os.getenv("EMAIL_HOST_PASSWORD", "")
-SENDER_NAME = "KheloMore Gaming Hub"
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
+
+# EMAIL_SENDER holds "Display Name <address@example.com>" — Brevo's API wants name and
+# email as separate fields, so split it. Falls back to EMAIL_HOST_USER (bare address, no
+# display name) if EMAIL_SENDER isn't set, for compatibility with the old SMTP-era var.
+_parsed_name, _parsed_email = parseaddr(os.getenv("EMAIL_SENDER", ""))
+SENDER_EMAIL = _parsed_email or os.getenv("EMAIL_HOST_USER", "")
+SENDER_NAME = _parsed_name or "KheloMore Gaming Hub"
 
 
 def _send_email(recipient: str, subject: str, html_body: str) -> bool:
-    """Core SMTP sender using Gmail."""
-    if not SMTP_USER or not SMTP_PASS:
-        print(f"[EMAIL] SMTP credentials missing — skipping send to {recipient}")
+    """Core sender — Brevo's HTTP transactional email API."""
+    if not BREVO_API_KEY or not SENDER_EMAIL:
+        print(f"[EMAIL] Brevo credentials missing — skipping send to {recipient}")
         return False
 
-    msg = MIMEMultipart("alternative")
-    msg["From"] = f"{SENDER_NAME} <{SMTP_USER}>"
-    msg["To"] = recipient
-    msg["Subject"] = subject
-    msg.attach(MIMEText(html_body, "html"))
-
     try:
-        # timeout=15: smtplib blocks forever with no timeout set. Confirmed live in
-        # production — this call hanging (Render's outbound connection to Gmail stalling)
-        # was what actually caused every login's gunicorn worker to hit WORKER TIMEOUT
-        # and get SIGKILLed, well past any reasonable SMTP handshake duration.
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(SMTP_USER, recipient, msg.as_string())
+        response = requests.post(
+            BREVO_API_URL,
+            headers={
+                "accept": "application/json",
+                "api-key": BREVO_API_KEY,
+                "content-type": "application/json",
+            },
+            json={
+                "sender": {"name": SENDER_NAME, "email": SENDER_EMAIL},
+                "to": [{"email": recipient}],
+                "subject": subject,
+                "htmlContent": html_body,
+            },
+            timeout=15,
+        )
+        if response.status_code >= 400:
+            print(f"[EMAIL] Brevo API Error {response.status_code}: {response.text}")
+            return False
         print(f"[EMAIL] Sent '{subject}' to {recipient}")
         return True
-    except Exception as e:
-        print(f"[EMAIL] SMTP Error: {e}")
+    except requests.RequestException as e:
+        print(f"[EMAIL] Brevo request failed: {e}")
         return False
 
 

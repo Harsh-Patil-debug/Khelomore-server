@@ -46,9 +46,9 @@ services:
         sync: false
       - key: CLOUDINARY_API_SECRET
         sync: false
-      - key: EMAIL_HOST_USER
+      - key: EMAIL_SENDER
         sync: false
-      - key: EMAIL_HOST_PASSWORD
+      - key: BREVO_API_KEY
         sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
@@ -69,9 +69,5 @@ services:
         value: "2592000"
       - key: JWT_ADMIN_EXP_DELTA_SECONDS
         value: "86400"
-      - key: EMAIL_HOST
-        value: smtp.gmail.com
-      - key: EMAIL_PORT
-        value: "587"
       - key: PYTHON_VERSION
         value: "3.12.0"
