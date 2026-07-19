@@ -78,11 +78,17 @@ LOGIN_LOCKOUT_MINUTES = int(os.getenv("LOGIN_LOCKOUT_MINUTES", "15"))
 OTP_RESEND_COOLDOWN_SECONDS = int(os.getenv("OTP_RESEND_COOLDOWN_SECONDS", "45"))
 
 ph = PasswordHasher(
-    time_cost=5,      # Number of iterations
-    memory_cost=128 * 1024,  # Memory in KB (256 MB here)
-    parallelism=2,    # Number of threads
-    hash_len=32,      # Length of hash
-    salt_len=16       # Length of salt
+    # OWASP's low-memory Argon2id recommendation (m=19 MiB, t=2, p=1) — the previous
+    # 128 MiB/time_cost=5/parallelism=2 config was tuned for a beefy machine and was
+    # crashing Render's free-tier instance (512 MB RAM, throttled CPU): a single login's
+    # hash verify ran long enough to hit gunicorn's WORKER TIMEOUT, and the worker got
+    # SIGKILL'd (confirmed live in Render logs). Still meets OWASP's minimum bar for
+    # Argon2id, just sized for the hardware this actually runs on.
+    time_cost=2,
+    memory_cost=19 * 1024,  # 19 MiB
+    parallelism=1,
+    hash_len=32,
+    salt_len=16
 )
 
 def verify_password(stored_hash, input_password):

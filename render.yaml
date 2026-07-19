@@ -15,7 +15,12 @@ services:
     runtime: python
     plan: free
     buildCommand: "pip install -r requirements.txt && cd server && python manage.py collectstatic --noinput && python manage.py migrate"
-    startCommand: "cd server && gunicorn server.wsgi:application --bind 0.0.0.0:$PORT"
+    # --timeout 60: gunicorn's default worker timeout is 30s. Render's free-tier CPU is
+    # heavily throttled, and a slow request (Argon2 password verify, a cold Mongo Atlas
+    # connection, etc.) can brush against that default — when it's hit, gunicorn SIGKILLs
+    # the worker mid-request, which is what actually caused the 500 -> 502 login crash
+    # seen live in production. 60s gives real headroom without masking a truly hung request.
+    startCommand: "cd server && gunicorn server.wsgi:application --bind 0.0.0.0:$PORT --timeout 60"
     envVars:
       # Secrets — set these manually in the Render dashboard (Environment tab); never
       # commit real values. See server/.env.example for what each one does.
