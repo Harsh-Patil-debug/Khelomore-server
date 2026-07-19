@@ -1039,23 +1039,13 @@ class SubscriptionMarkPaidView(APIView):
 
 
 class BookingDetailView(APIView):
-    """PUT /bookings/<id>/ — Update, DELETE /bookings/<id>/ — Cancel/Free slot"""
+    """PUT /bookings/<id>/ — Update a booking (status, slot, date, rig)."""
     def put(self, request, booking_id):
         email, error_response, is_privileged = authenticate_booking_access(request, booking_id)
         if error_response:
             return error_response
 
         response = bookings.update_booking_handler(booking_id, request.data, allow_payment_status_change=is_privileged)
-        if response.get("status") == "error":
-            return Response(response, status=status.HTTP_400_BAD_REQUEST)
-        return Response(response, status=status.HTTP_200_OK)
-
-    def delete(self, request, booking_id):
-        email, error_response, _ = authenticate_booking_access(request, booking_id)
-        if error_response:
-            return error_response
-
-        response = bookings.delete_booking_handler(booking_id)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)

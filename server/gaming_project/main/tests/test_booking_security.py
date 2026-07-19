@@ -1,6 +1,6 @@
 # test_booking_security.py
-# Regression tests for: booking detail IDOR (update/delete), booking-list IDOR (cafe_id
-# scoped listing), and the payment-integrity fix (server-side price + Razorpay verification).
+# Regression tests for: booking detail IDOR (update), booking-list IDOR (cafe_id scoped
+# listing), and the payment-integrity fix (server-side price + Razorpay verification).
 
 from bson import ObjectId
 
@@ -8,17 +8,7 @@ from .base import SecurityTestCase
 
 
 class BookingDetailOwnershipTests(SecurityTestCase):
-    """Guards against any authenticated user modifying/deleting another user's booking."""
-
-    def test_unrelated_user_cannot_delete_someone_elses_booking(self):
-        owner_email, _ = self.make_active_user()
-        attacker_email, attacker_token = self.make_active_user()
-        cafe_id = self.make_cafe(owner_email="cafe-owner-a@khelomore.invalid")
-        booking_id = self.make_booking(owner_email, cafe_id)
-
-        resp = self.client.delete(f"/api/v1/main/bookings/{booking_id}/", **self.auth_header(attacker_token))
-        self.assertEqual(resp.status_code, 403)
-        self.assertIsNotNone(self.db.bookings.find_one({"_id": ObjectId(booking_id)}))
+    """Guards against any authenticated user modifying another user's booking."""
 
     def test_unrelated_user_cannot_update_someone_elses_booking(self):
         owner_email, _ = self.make_active_user()
@@ -35,15 +25,6 @@ class BookingDetailOwnershipTests(SecurityTestCase):
         self.assertEqual(resp.status_code, 403)
         doc = self.db.bookings.find_one({"_id": ObjectId(booking_id)})
         self.assertEqual(doc["payment_status"], "pending")
-
-    def test_owner_can_delete_their_own_booking(self):
-        owner_email, owner_token = self.make_active_user()
-        cafe_id = self.make_cafe(owner_email="cafe-owner-c@khelomore.invalid")
-        booking_id = self.make_booking(owner_email, cafe_id)
-
-        resp = self.client.delete(f"/api/v1/main/bookings/{booking_id}/", **self.auth_header(owner_token))
-        self.assertEqual(resp.status_code, 200)
-        self.assertIsNone(self.db.bookings.find_one({"_id": ObjectId(booking_id)}))
 
     def test_owner_cannot_self_mark_their_own_booking_as_paid(self):
         """A booking's own user is not a 'privileged' caller — only the cafe owner/super
