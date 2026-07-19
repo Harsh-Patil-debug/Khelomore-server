@@ -70,6 +70,11 @@ REST_FRAMEWORK = {
         # credential-guessing attack surface; the loose defaults exist for general API
         # traffic (dashboards polling, image-heavy list views), not this.
         'auth': '20/minute',
+        # Applied to the public Google-Maps-link parser (used by both the super-admin
+        # "Add Gaming Cafe" form and the public "Partner Application" form) — it makes an
+        # outbound network call per request, so without a tighter cap than the generous
+        # anon default, it'd be an easy target for someone to hammer as a free proxy/DoS.
+        'geo': '30/minute',
     }
 }
 
@@ -199,6 +204,13 @@ SECURE_REFERRER_POLICY = 'same-origin'
 X_FRAME_OPTIONS = 'DENY'
 
 if not DEBUG:
+    # Render (and every similar PaaS — Heroku, Railway, Fly.io) terminates TLS at its own
+    # edge proxy and forwards the request to this app over plain HTTP internally. Without
+    # telling Django to trust the proxy's X-Forwarded-Proto header, request.is_secure()
+    # always evaluates False here — which combined with SECURE_SSL_REDIRECT below causes
+    # Django to "redirect" every already-HTTPS request to HTTPS again, forever: an
+    # infinite redirect loop that takes the entire API down in production.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_SSL_REDIRECT = True
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
