@@ -48,3 +48,8 @@ requests==2.32.3
 
 # ── Config ──────────────────────────────────────
 python-dotenv==1.0.1
+
+# ── Dev utilities ─────────────────────────────────
+# Not imported by gaming_project.main itself — used only by create_test_cafe.py (a
+# standalone script in server/) to auto-geocode an address into lat/lon.
+geopy==2.4.1
