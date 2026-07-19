@@ -178,14 +178,34 @@ def create_booking_handler(data):
 
 
 def delete_booking_handler(booking_id):
-    """Deletes a booking by ID to immediately release slots."""
+    """Deletes a booking by ID to immediately release slots and its rig."""
     db_main = get_db()
     if db_main is None:
         return {"status": "error", "message": "MongoDB connection is not established."}
     try:
+        booking = db_main.bookings.find_one({"_id": ObjectId(booking_id)})
+        if not booking:
+            return {"status": "error", "message": "Booking not found."}
+
         res = db_main.bookings.delete_one({"_id": ObjectId(booking_id)})
         if res.deleted_count == 0:
             return {"status": "error", "message": "Booking not found."}
+
+        # Slot availability for new bookings is determined by querying live Upcoming/Active
+        # bookings directly, not by this field, so deleting the booking already frees the
+        # slot itself — but a cafe owner's own rig floor view reads rigs.status directly for
+        # live occupancy, and nothing else releases it back to "available" on cancellation
+        # (only the separate auto-expiry path in get_user_bookings_handler does this today).
+        # Same rig-name parsing as that path, for the same reason: "PC #01 · RTX 4090" ->
+        # "PC #01".
+        rig_raw = booking.get("rig")
+        if rig_raw and booking.get("status") == "Active":
+            rig_name = rig_raw.replace("•", "·").split("·")[0].strip()
+            db_main.rigs.update_one(
+                {"cafe_id": booking.get("cafe_id"), "name": rig_name},
+                {"$set": {"status": "available"}}
+            )
+
         return {"status": "success", "message": "Booking deleted successfully."}
     except Exception as e:
         return {"status": "error", "message": f"Failed to delete booking: {e}"}
