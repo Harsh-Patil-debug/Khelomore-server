@@ -192,19 +192,26 @@ def get_tournaments_handler(cafe_id=None):
         if delete_result.deleted_count > 0:
             print(f"[KheloMore] Cleared {delete_result.deleted_count} stale generic seeded tournaments.")
 
-        for seed in SEED_TOURNAMENTS:
-            seed_copy = dict(seed)
-            seed_copy["_id"] = ObjectId(seed_copy["_id"])
-            if db_main.tournaments.count_documents({"_id": seed_copy["_id"]}) == 0:
+        # Only seed demo tournaments into a genuinely empty collection (fresh deploy) —
+        # checking each seed's own _id individually (the old behavior) meant deleting any
+        # one of these 4 demo tournaments got it silently re-inserted on the very next
+        # list fetch, forever. Confirmed live: super admin deletes "resurrected" on refresh.
+        if db_main.tournaments.count_documents({}) == 0:
+            for seed in SEED_TOURNAMENTS:
+                seed_copy: dict = dict(seed)
+                seed_copy["_id"] = ObjectId(seed_copy["_id"])
                 db_main.tournaments.insert_one(seed_copy)
                 print(f"[KheloMore] Seeded default tournament: '{seed_copy['title']}' with ID '{seed_copy['_id']}'")
-            else:
-                # Migrate existing seeds that are missing starts_iso / registration_open
+        else:
+            # Migrate existing seeds that are missing starts_iso / registration_open —
+            # harmless no-op once already backfilled.
+            for seed in SEED_TOURNAMENTS:
+                seed_id = ObjectId(seed["_id"])
                 db_main.tournaments.update_many(
-                    {"_id": seed_copy["_id"], "starts_iso": {"$exists": False}},
+                    {"_id": seed_id, "starts_iso": {"$exists": False}},
                     {"$set": {
-                        "starts_iso": seed_copy["starts_iso"],
-                        "registration_open": seed_copy.get("registration_open", True)
+                        "starts_iso": seed["starts_iso"],
+                        "registration_open": seed.get("registration_open", True)
                     }}
                 )
 
