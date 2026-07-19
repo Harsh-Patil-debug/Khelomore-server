@@ -23,8 +23,11 @@ pyotp==2.9.0
 qrcode==8.2
 
 # ── Google Sign-In ────────────────────────────
+# Only google.oauth2.id_token / google.auth.transport.requests are used (verifying an
+# already-issued ID token client-side Google Sign-In hands us) — google-auth-oauthlib
+# provides the full OAuth2 authorization-code flow (google_auth_oauthlib.flow), which
+# this app never uses. Confirmed via grep: zero imports anywhere in the codebase.
 google-auth==2.37.0
-google-auth-oauthlib==1.2.1
 
 # ── Payments ───────────────────────────────────
 # razorpay's client imports pkg_resources (part of setuptools) at module load time, using
