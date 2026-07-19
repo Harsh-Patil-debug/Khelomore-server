@@ -33,81 +33,6 @@ def safe_object_id(id_str):
         return id_str
 
 
-SEED_TOURNAMENTS = [
-    {
-        "_id": "6a3bb8f1ec5f66ea71485bd1",
-        "game": "VALORANT",
-        "title": "Cyber Invitational S3",
-        "prize": "\u20b950,000",
-        "entry": "Paid Entry",
-        "entry_fee": 400,
-        "registered": 28,
-        "capacity": 32,
-        "unit": "Squads",
-        "mode": "Squad",
-        "starts": "Sat 28 Jun \u00b7 6:00 PM",
-        "starts_iso": "2026-06-28T12:30:00Z",
-        "registration_open": True,
-        "images": [
-            "https://images.unsplash.com/photo-1624138784614-87fd1b6528f8?q=80&w=600"
-        ]
-    },
-    {
-        "_id": "6a3bb8f1ec5f66ea71485bd2",
-        "game": "BGMI",
-        "title": "Nerul Battle Royale",
-        "prize": "\u20b925,000",
-        "entry": "Free Entry",
-        "registered": 56,
-        "capacity": 64,
-        "unit": "Squads",
-        "mode": "Squad",
-        "starts": "Sun 29 Jun \u00b7 4:00 PM",
-        "starts_iso": "2026-06-29T10:30:00Z",
-        "registration_open": True,
-        "images": [
-            "https://images.unsplash.com/photo-1607604276583-eef5d076aa5f?q=80&w=600"
-        ]
-    },
-    {
-        "_id": "6a3bb8f1ec5f66ea71485bd3",
-        "game": "CS2",
-        "title": "Clutch Cup Mumbai",
-        "prize": "\u20b91,00,000",
-        "entry": "Paid Entry",
-        "entry_fee": 600,
-        "registered": 12,
-        "capacity": 16,
-        "unit": "Squads",
-        "mode": "Squad",
-        "starts": "Fri 04 Jul \u00b7 7:30 PM",
-        "starts_iso": "2026-07-04T14:00:00Z",
-        "registration_open": True,
-        "images": [
-            "https://images.unsplash.com/photo-1538481199705-c710c4e965fc?q=80&w=600"
-        ]
-    },
-    {
-        "_id": "6a3bb8f1ec5f66ea71485bd4",
-        "game": "TEKKEN 8",
-        "title": "Fight Night Solo",
-        "prize": "\u20b910,000",
-        "entry": "Free Entry",
-        "registered": 22,
-        "capacity": 32,
-        "unit": "Players",
-        "mode": "Solo",
-        "starts": "Wed 02 Jul \u00b7 8:00 PM",
-        "starts_iso": "2026-07-02T14:30:00Z",
-        "registration_open": True,
-        "images": [
-            "https://images.unsplash.com/photo-1551103782-8ab07afd45c1?q=80&w=600"
-        ]
-    }
-]
-
-
-
 def map_tournament_doc(doc):
     """Maps a MongoDB tournament document to the format expected by the frontend."""
     starts_iso = doc.get("starts_iso")
@@ -140,82 +65,14 @@ def map_tournament_doc(doc):
 
 
 def get_tournaments_handler(cafe_id=None):
-    """Retrieves all esports tournaments from the database. Seeds if empty."""
+    """Retrieves all esports tournaments from the database."""
     db_main = get_db()
     if db_main is None:
         return {"status": "error", "message": "MongoDB connection is not established."}
 
     try:
-        generic_img = "https://images.unsplash.com/photo-1542751371-adc38448a05e?q=80&w=600"
-        seeded_titles = [t["title"] for t in SEED_TOURNAMENTS]
-
-        # Synced ObjectId list for seeded tournaments
-        new_ids = [
-            ObjectId("6a3bb8f1ec5f66ea71485bd1"), # VALORANT
-            ObjectId("6a3bb8f1ec5f66ea71485bd2"), # BGMI
-            ObjectId("6a3bb8f1ec5f66ea71485bd3"), # CS2
-            ObjectId("6a3bb8f1ec5f66ea71485bd4")  # TEKKEN 8
-        ]
-
-        # Clean up old seed tournaments (ObjectId or old string IDs)
-        db_main.tournaments.delete_many({
-            "_id": {"$in": ["val-invitational", "bgmi-rumble", "cs2-clutch", "tekken-solo", "tekken 8"]}
-        })
-        for seed in SEED_TOURNAMENTS:
-            db_main.tournaments.delete_many({
-                "title": seed["title"],
-                "_id": {"$nin": new_ids}
-            })
-
-        # Migrate legacy registrations to the new ObjectId formats
-        db_main.registrations.update_many(
-            {"tournament_id": {"$in": ["tekken-solo", "tekken 8"]}},
-            {"$set": {"tournament_id": ObjectId("6a3bb8f1ec5f66ea71485bd4")}}
-        )
-        db_main.registrations.update_many(
-            {"tournament_id": "val-invitational"},
-            {"$set": {"tournament_id": ObjectId("6a3bb8f1ec5f66ea71485bd1")}}
-        )
-        db_main.registrations.update_many(
-            {"tournament_id": "bgmi-rumble"},
-            {"$set": {"tournament_id": ObjectId("6a3bb8f1ec5f66ea71485bd2")}}
-        )
-        db_main.registrations.update_many(
-            {"tournament_id": "cs2-clutch"},
-            {"$set": {"tournament_id": ObjectId("6a3bb8f1ec5f66ea71485bd3")}}
-        )
-
-        delete_result = db_main.tournaments.delete_many({
-            "title": {"$in": seeded_titles},
-            "images": generic_img
-        })
-        if delete_result.deleted_count > 0:
-            print(f"[KheloMore] Cleared {delete_result.deleted_count} stale generic seeded tournaments.")
-
-        # Only seed demo tournaments into a genuinely empty collection (fresh deploy) —
-        # checking each seed's own _id individually (the old behavior) meant deleting any
-        # one of these 4 demo tournaments got it silently re-inserted on the very next
-        # list fetch, forever. Confirmed live: super admin deletes "resurrected" on refresh.
-        if db_main.tournaments.count_documents({}) == 0:
-            for seed in SEED_TOURNAMENTS:
-                seed_copy: dict = dict(seed)
-                seed_copy["_id"] = ObjectId(seed_copy["_id"])
-                db_main.tournaments.insert_one(seed_copy)
-                print(f"[KheloMore] Seeded default tournament: '{seed_copy['title']}' with ID '{seed_copy['_id']}'")
-        else:
-            # Migrate existing seeds that are missing starts_iso / registration_open —
-            # harmless no-op once already backfilled.
-            for seed in SEED_TOURNAMENTS:
-                seed_id = ObjectId(seed["_id"])
-                db_main.tournaments.update_many(
-                    {"_id": seed_id, "starts_iso": {"$exists": False}},
-                    {"$set": {
-                        "starts_iso": seed["starts_iso"],
-                        "registration_open": seed.get("registration_open", True)
-                    }}
-                )
-
-        # Migrate any user-created tournaments missing registration_open
+        # Migrate any user-created tournaments missing registration_open — the one
+        # ongoing backfill that's actually still relevant (real tournaments, not seeds).
         db_main.tournaments.update_many(
             {"registration_open": {"$exists": False}},
             {"$set": {"registration_open": True}}
