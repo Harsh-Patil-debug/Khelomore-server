@@ -223,6 +223,34 @@ def generate_slots_from_hours(operating_hours):
         return DEFAULT_SLOTS
 
 
+def _effective_cafe_status(doc):
+    """
+    A cafe's displayed status isn't just the manually-toggled `status` field — a cafe more
+    than SUBSCRIPTION_GRACE_DAYS past its subscription due date must show as "suspended"
+    automatically, the moment anyone next looks at it, without needing a scheduled job or
+    the super admin to have manually flipped the toggle. Computed on every read (same
+    lazy/on-read convention subscriptions.py itself uses for subscription_status), not
+    written back here — the write only happens via subscriptions._ensure_defaults, which
+    this intentionally does not duplicate.
+
+    "pending"/"rejected" are pre-onboarding states unrelated to billing and are never
+    overridden by a subscription check.
+    """
+    stored_status = doc.get("status", "active")
+    if stored_status in ("pending", "rejected"):
+        return stored_status
+
+    grace_until = doc.get("subscription_grace_until")
+    if grace_until is not None:
+        from datetime import datetime, timezone
+        if grace_until.tzinfo is None:
+            grace_until = grace_until.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > grace_until:
+            return "suspended"
+
+    return stored_status
+
+
 def map_cafe_doc(doc, user_lat=None, user_lon=None, public=False):
     """
     Maps a MongoDB cafe document to the format expected by the React Native frontend.
@@ -278,7 +306,7 @@ def map_cafe_doc(doc, user_lat=None, user_lon=None, public=False):
         "city": doc.get("city", ""),
         "phone": doc.get("phone", ""),
         "is_deleted": doc.get("is_deleted", False),
-        "status": doc.get("status", "active"),
+        "status": _effective_cafe_status(doc),
 
         # Profile specific fields
         "banner_url": doc.get("banner_url") or (images_list[0] if images_list else ""),
@@ -344,7 +372,7 @@ def get_cafes_handler(latitude=None, longitude=None, include_deleted=False):
                     pass
 
         # Retrieve all cafes and sort by calculated distance (nearest first)
-        query = {} if include_deleted else {"is_deleted": {"$ne": True}}
+        query: dict = {} if include_deleted else {"is_deleted": {"$ne": True}}
         if not include_deleted:
             # A cafe more than the grace period past its ₹1500/month subscription due
             # date is hidden from the public listing until paid — the cafe owner's own
@@ -358,6 +386,9 @@ def get_cafes_handler(latitude=None, longitude=None, include_deleted=False):
                 {"subscription_grace_until": {"$exists": False}},
                 {"subscription_grace_until": {"$gte": now_ist}},
             ]
+            # A super admin's manual "Suspend Hub" (status field) is a separate reason to
+            # hide a cafe from the public listing, independent of billing.
+            query["status"] = {"$ne": "suspended"}
         docs = list(db_main.cafes.find(query))
         # include_deleted is already super-admin-gated at the view layer, so that path may
         # see full owner detail; the plain public listing must not.
