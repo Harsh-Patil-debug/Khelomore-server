@@ -35,7 +35,11 @@ def _send_email(recipient: str, subject: str, html_body: str) -> bool:
     msg.attach(MIMEText(html_body, "html"))
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        # timeout=15: smtplib blocks forever with no timeout set. Confirmed live in
+        # production — this call hanging (Render's outbound connection to Gmail stalling)
+        # was what actually caused every login's gunicorn worker to hit WORKER TIMEOUT
+        # and get SIGKILLed, well past any reasonable SMTP handshake duration.
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_USER, recipient, msg.as_string())
