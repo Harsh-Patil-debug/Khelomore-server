@@ -33,6 +33,7 @@ urlpatterns = [
     path('cafes/<str:cafe_id>/subscription/trial-welcome-shown/', CafeSubscriptionTrialWelcomeShownView.as_view(), name='cafe_subscription_trial_welcome_shown'),
     path('cafes/<str:cafe_id>/subscription/verify/', CafeSubscriptionVerifyView.as_view(), name='cafe_subscription_verify'),
     path('subscriptions/', SubscriptionsListView.as_view(), name='subscriptions_list'),
+    path('subscriptions/payments/', SubscriptionPaymentsListView.as_view(), name='subscription_payments_list'),
     path('subscriptions/<str:cafe_id>/mark-paid/', SubscriptionMarkPaidView.as_view(), name='subscription_mark_paid'),
 
     # ── Tournaments ───────────────────────────────────────────────────────────

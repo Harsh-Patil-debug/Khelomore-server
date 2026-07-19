@@ -358,3 +358,39 @@ def get_all_subscriptions_handler():
         })
     rows.sort(key=lambda r: r["due_date"])
     return {"status": "success", "subscriptions": rows}, 200
+
+
+def get_all_subscription_payments_handler():
+    """
+    Super-admin-only: every subscription payment ever recorded, across all cafes — this
+    is the platform's actual recurring-revenue ledger (real money KheloMore itself earns),
+    as distinct from booking payments, which route to each cafe's own Razorpay account
+    (or the platform's fallback account, pending payout to the cafe) and are never
+    platform revenue. For the Payments page.
+    """
+    db = get_db()
+    if db is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}, 500
+
+    cursor = db.subscription_payments.find({}).sort("paid_at", -1)
+    rows = []
+    for p in cursor:
+        cafe_id = p.get("cafe_id")
+        cafe = None
+        if cafe_id and ObjectId.is_valid(str(cafe_id)):
+            cafe = db.cafes.find_one({"_id": ObjectId(cafe_id)}, {"name": 1, "city": 1})
+        rows.append({
+            "id": str(p["_id"]),
+            "cafe_id": cafe_id,
+            "cafe_name": cafe.get("name", "") if cafe else "Deleted cafe",
+            "city": cafe.get("city", "") if cafe else "",
+            "amount": p.get("amount"),
+            "method": p.get("method", "razorpay"),
+            "razorpay_order_id": p.get("razorpay_order_id") or "",
+            "razorpay_payment_id": p.get("razorpay_payment_id") or "",
+            "marked_by": p.get("marked_by") or "",
+            "paid_at": _to_ist_iso(p.get("paid_at")),
+            "period_start": _to_ist_iso(p.get("period_start")),
+            "period_end": _to_ist_iso(p.get("period_end")),
+        })
+    return {"status": "success", "payments": rows}, 200

@@ -1038,6 +1038,17 @@ class SubscriptionMarkPaidView(APIView):
         return Response(response, status=status_code)
 
 
+class SubscriptionPaymentsListView(APIView):
+    """GET /subscriptions/payments/ — Every subscription payment across every cafe, the
+    platform's actual revenue ledger (Super Admin only)."""
+    def get(self, request):
+        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        if error_response:
+            return error_response
+        response, status_code = subscriptions.get_all_subscription_payments_handler()
+        return Response(response, status=status_code)
+
+
 class BookingDetailView(APIView):
     """PUT /bookings/<id>/ — Update a booking (status, slot, date, rig)."""
     def put(self, request, booking_id):
