@@ -362,6 +362,51 @@ class KheloMoreResendOTPView(APIView):
         return Response({"encrypted_response": enc_resp, "iv": new_iv}, status=200)
 
 
+class KheloMoreForgotPasswordView(APIView):
+    """
+    POST /auth/forgot-password/
+    Body: { email, iv, role }           — AES-CBC encrypted (except role)
+    Returns: encrypted { message }       — same generic message whether or not the
+    account exists, to avoid email enumeration.
+    """
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    def post(self, request):
+        data = request.data
+        # No role guard here, same reasoning as login: this can only look up an existing
+        # account (find_one), never create or promote one.
+        result, status_code = auth_handler.khelomore_forgot_password(
+            email    = data.get("email", ""),
+            iv       = data.get("iv", ""),
+            is_admin = check_is_admin(request),
+            role     = data.get("role", ""),
+        )
+        return Response(result, status=status_code)
+
+
+class KheloMoreResetPasswordView(APIView):
+    """
+    POST /auth/reset-password/
+    Body: { email, otp_code, new_password, iv, role }   — AES-CBC encrypted (except role)
+    Returns: encrypted { message }
+    """
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    def post(self, request):
+        data = request.data
+        result, status_code = auth_handler.khelomore_reset_password(
+            email        = data.get("email", ""),
+            otp_code     = data.get("otp_code", ""),
+            new_password = data.get("new_password", ""),
+            iv           = data.get("iv", ""),
+            is_admin     = check_is_admin(request),
+            role         = data.get("role", ""),
+        )
+        return Response(result, status=status_code)
+
+
 def _is_allowed_oauth_redirect_target(target):
     """
     SECURITY: `state`/`return_url` is unauthenticated, attacker-influenceable input that

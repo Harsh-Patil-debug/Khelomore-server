@@ -66,8 +66,8 @@ def _send_email(recipient: str, subject: str, html_body: str) -> bool:
 
 def send_otp_email(recipient: str, otp: str, gamertag: str = "PLAYER", purpose: str = "verification") -> bool:
     """
-    Sends a 6-digit OTP for login or signup verification.
-    purpose: 'login' | 'signup' | 'verification'
+    Sends a 6-digit OTP for login, signup, or password-reset verification.
+    purpose: 'login' | 'signup' | 'password_reset' | 'verification'
     """
     # SECURITY: OTP codes must never hit server logs in production — anyone with log
     # access could otherwise authenticate as any user (including super admins) without
@@ -80,7 +80,12 @@ def send_otp_email(recipient: str, otp: str, gamertag: str = "PLAYER", purpose: 
         print(f"  OTP Code: {otp}")
         print("=" * 55 + "\n")
 
-    action_label = "Sign Up" if purpose == "signup" else "Login"
+    if purpose == "signup":
+        action_label = "Sign Up"
+    elif purpose == "password_reset":
+        action_label = "Password Reset"
+    else:
+        action_label = "Login"
     subject = f"KheloMore — Your {action_label} Verification Code: {otp}"
 
     html_body = f"""

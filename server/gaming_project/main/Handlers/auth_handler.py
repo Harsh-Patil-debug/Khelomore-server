@@ -459,6 +459,131 @@ def khelomore_verify_otp(email, otp_code, iv, is_admin=False, role=""):
     return {"encrypted_response": enc_resp, "iv": iv2}, 200
 
 
+MAX_PASSWORD_RESET_ATTEMPTS = MAX_OTP_ATTEMPTS
+
+
+def khelomore_forgot_password(email, iv, is_admin=False, role=""):
+    """
+    Step 1 of password reset: if an account exists for this email, email it a reset OTP.
+
+    SECURITY: always returns the same generic message regardless of whether the account
+    exists, is Google-only (no password to reset), or is blocked — revealing any of that
+    here would let an attacker enumerate registered emails or account types. Only the
+    actual reset step (khelomore_reset_password) needs the OTP to have been genuinely
+    sent, which it silently isn't for any of those cases.
+    """
+    try:
+        dec_email = decrypt_data(email, iv).strip().lower()
+    except Exception as e:
+        return {"error": f"Decryption failed: {str(e)}"}, 400
+
+    error = input_validation.validate_email(dec_email)
+    if error:
+        return {"error": error}, 400
+
+    generic_message = {"message": "If an account exists for this email, a password reset code has been sent."}
+
+    coll = get_user_collection(is_admin, role)
+    user = coll.find_one({"email": dec_email})
+
+    def _respond():
+        enc_resp, iv2 = encrypt_data(json.dumps(generic_message), ENCRYPTION_KEY)
+        return {"encrypted_response": enc_resp, "iv": iv2}, 200
+
+    if not user or user.get("status") == "Blocked" or not user.get("password_hash"):
+        return _respond()
+
+    # Same resend-cooldown protection as OTP resend — without it, an attacker with email
+    # access could otherwise trigger unlimited fresh codes to dodge the reset-attempt cap.
+    prev_expiry = user.get("reset_otp_expiry")
+    if prev_expiry:
+        if prev_expiry.tzinfo is None:
+            prev_expiry = prev_expiry.replace(tzinfo=timezone.utc).astimezone(IST)
+        last_sent = prev_expiry - timedelta(minutes=get_otp_expiry_minutes(role))
+        elapsed = (datetime.now(IST) - last_sent).total_seconds()
+        if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
+            return _respond()
+
+    otp_code = str(random.randint(100000, 999999))
+    otp_expiry = datetime.now(IST) + timedelta(minutes=get_otp_expiry_minutes(role))
+    coll.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"reset_otp_code": otp_code, "reset_otp_expiry": otp_expiry},
+         "$unset": {"reset_otp_attempts": ""}}
+    )
+
+    gamertag = user.get("gamertag") or user.get("first_name", "PLAYER")
+    from .email_handler import send_otp_email
+    send_otp_email(dec_email, otp_code, gamertag=gamertag, purpose="password_reset")
+
+    return _respond()
+
+
+def khelomore_reset_password(email, otp_code, new_password, iv, is_admin=False, role=""):
+    """Step 2 of password reset: verify the reset OTP and set a new password."""
+    try:
+        dec_email = decrypt_data(email, iv).strip().lower()
+        dec_otp = decrypt_data(otp_code, iv).strip()
+        dec_new_password = decrypt_data(new_password, iv)
+    except Exception as e:
+        return {"error": f"Decryption failed: {str(e)}"}, 400
+
+    password_error = input_validation.validate_password_strength(dec_new_password)
+    if password_error:
+        return {"error": password_error}, 400
+
+    coll = get_user_collection(is_admin, role)
+    user = coll.find_one({"email": dec_email})
+    # Same message whether the account doesn't exist or simply has no reset request
+    # pending — don't help an attacker distinguish the two.
+    invalid_response = {"error": "Invalid or expired reset code. Please request a new one."}, 400
+    if not user:
+        return invalid_response
+
+    stored_otp = user.get("reset_otp_code")
+    otp_exp = user.get("reset_otp_expiry")
+    if not stored_otp or not otp_exp:
+        return invalid_response
+
+    if otp_exp.tzinfo is None:
+        otp_exp = otp_exp.replace(tzinfo=timezone.utc).astimezone(IST)
+    if datetime.now(IST) > otp_exp:
+        return {"error": "Reset code has expired. Please request a new one."}, 400
+
+    if stored_otp != dec_otp:
+        # SECURITY: bound OTP guessing exactly like login/signup OTPs — a 6-digit code
+        # has only 1,000,000 possibilities, so unlimited attempts would make it
+        # brute-forceable well within the code's expiry window.
+        attempts = int(user.get("reset_otp_attempts", 0)) + 1
+        if attempts >= MAX_PASSWORD_RESET_ATTEMPTS:
+            coll.update_one(
+                {"_id": user["_id"]},
+                {"$unset": {"reset_otp_code": "", "reset_otp_expiry": "", "reset_otp_attempts": ""}}
+            )
+            return {"error": "Too many incorrect attempts. Please request a new code."}, 429
+        coll.update_one({"_id": user["_id"]}, {"$set": {"reset_otp_attempts": attempts}})
+        return {"error": "Invalid reset code."}, 400
+
+    new_password_hash = ph.hash(dec_new_password)
+    coll.update_one(
+        {"_id": user["_id"]},
+        {
+            "$set": {"password_hash": new_password_hash},
+            # Clearing login_attempts/login_locked_until too: a successful password reset
+            # is stronger proof of ownership than a login OTP ever was, so any existing
+            # login lockout from earlier guessing shouldn't outlive it.
+            "$unset": {
+                "reset_otp_code": "", "reset_otp_expiry": "", "reset_otp_attempts": "",
+                "login_attempts": "", "login_locked_until": "",
+            },
+        },
+    )
+
+    response_data = {"message": "Password reset successfully. Please log in with your new password."}
+    enc_resp, iv2 = encrypt_data(json.dumps(response_data), ENCRYPTION_KEY)
+    return {"encrypted_response": enc_resp, "iv": iv2}, 200
+
+
 def khelomore_google_auth(gmail, gamertag, iv, is_admin=False, role=""):
     """Google Sign-In: find or create user, return JWT DIRECTLY (no OTP needed)."""
     try:
