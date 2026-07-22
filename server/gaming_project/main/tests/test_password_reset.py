@@ -176,6 +176,56 @@ class ResetPasswordTests(SecurityTestCase):
         resp = self._reset(email, "123456", "NewStrongPassword456!")
         self.assertEqual(resp.status_code, 400)
 
+    def test_reset_works_correctly_for_every_account_type(self):
+        """
+        The one thing that actually matters end-to-end: for each of the four real account
+        types (plain gamer, website gamer, cafe owner, super admin), a reset must land in
+        THAT account's own collection, as a genuine Argon2id hash (not plaintext, not some
+        other hash scheme), and the new password must actually work to log back in via
+        that same role.
+        """
+        cases = [
+            ("users", "", False),
+            ("website_users", "website_user", False),
+            ("admins", "admin", True),
+            ("super_admin", "super_admin", False),
+        ]
+        for collection, role, is_admin in cases:
+            with self.subTest(collection=collection, role=role):
+                email, _ = self.make_active_user(
+                    password="OldPassword123!", role=role, collection=collection
+                )
+                if role == "admin":
+                    # Cafe-owner login/reset both require an associated, non-deleted cafe.
+                    self.make_cafe(owner_email=email)
+
+                self._set_reset_otp(email, otp="741852", collection=collection)
+                resp = self._reset(email, "741852", "NewStrongPassword456!", role=role)
+                self.assertEqual(resp.status_code, 200, f"reset failed for {collection}: {resp.json()}")
+
+                doc = self.db[collection].find_one({"email": email})
+                self.assertIsNotNone(doc, f"{collection}: account disappeared after reset")
+                stored_hash = doc.get("password_hash", "") if doc else ""
+                # argon2-cffi's PasswordHasher always produces this prefix — confirms the
+                # new password was actually hashed with Argon2id, not stored as plaintext
+                # or some other scheme.
+                self.assertTrue(
+                    stored_hash.startswith("$argon2id$"),
+                    f"{collection}: password_hash doesn't look like Argon2id: {stored_hash!r}",
+                )
+                self.assertNotIn("NewStrongPassword456!", stored_hash)
+
+                enc_email, enc_pw, iv = self.encrypt_with_shared_iv(email, "NewStrongPassword456!")
+                login_resp = self.client.post(
+                    "/api/v1/main/auth/login/",
+                    {"email": enc_email, "password": enc_pw, "iv": iv, "role": role},
+                    format="json",
+                )
+                self.assertEqual(
+                    login_resp.status_code, 200,
+                    f"login with new password failed for {collection}: {login_resp.json()}",
+                )
+
     def test_admin_role_reset_does_not_touch_a_users_collection_account(self):
         """Cross-collection isolation: the same email registered as a plain gamer
         ("users") must be untouched by a role="admin" reset request."""
