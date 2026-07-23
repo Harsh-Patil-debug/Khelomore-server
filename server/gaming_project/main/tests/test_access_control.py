@@ -90,6 +90,23 @@ class CafeOwnerEmailExposureTests(SecurityTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(all(c["owner_email"] == owner_email for c in resp.json()["cafes"]))
 
+    def test_dual_role_account_does_not_see_other_owners_cafes_on_my_cafes(self):
+        """Regression test: /cafes/my/ used to check super-admin auth first and, if the
+        authenticated email had ANY super_admin account (e.g. a dev/test account also used
+        across playhub-command), returned every cafe on the platform instead of just the
+        caller's own — a real cross-tenant leak for any email present in both collections."""
+        shared_email = self.unique_email("dual-role")
+        self.make_active_user(email=shared_email, role="super_admin", collection="super_admin")
+        _, owner_token = self.make_active_user(email=shared_email, role="admin", collection="admins")
+        my_cafe_id = self.make_cafe(owner_email=shared_email)
+        other_cafe_id = self.make_cafe(owner_email=self.unique_email("other-owner"))
+
+        resp = self.client.get("/api/v1/main/cafes/my/", **self.auth_header(owner_token))
+        self.assertEqual(resp.status_code, 200)
+        ids = {c["id"] for c in resp.json()["cafes"]}
+        self.assertIn(my_cafe_id, ids)
+        self.assertNotIn(other_cafe_id, ids)
+
     def test_super_admin_still_sees_owner_email_via_include_deleted(self):
         doc = {
             "name": "Sectest Owner-Visible Deleted Cafe", "area": "Test Area",

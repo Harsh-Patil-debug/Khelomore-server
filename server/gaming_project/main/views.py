@@ -75,24 +75,25 @@ class CafeListCreateView(APIView):
 
 
 class CafeMyListView(APIView):
-    """GET /cafes/my/ — List cafes owned by the authenticated admin."""
-    def get(self, request):
-        print("[DEBUG CafeMyListView] Received GET /cafes/my/")
-        
-        # 1. Try super admin first
-        email, error_response = auth_middleware.authenticate_super_admin_request(request)
-        if not error_response:
-            response = cafes.get_my_cafes_handler(email, is_super_admin=True)
-            if response.get("status") == "error":
-                return Response(response, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            return Response(response, status=status.HTTP_200_OK)
+    """
+    GET /cafes/my/ — List cafes owned by the authenticated admin.
 
-        # 2. Fall back to normal admin/owner
+    SECURITY: this must NEVER opportunistically check authenticate_super_admin_request —
+    auth cookies are set with no Domain restriction and SameSite=None, so a super_admin
+    cookie left over from a previous playhub-command session on the same browser rides
+    along with cafe-command-center requests to this same backend host. This view used to
+    check super-admin auth first and return every cafe in that case, which meant any owner
+    who also happened to have (or had ever logged into) a super_admin account would see
+    every other owner's cafes in their own "my cafes" list — playhub-command doesn't even
+    call this endpoint, so that branch served no legitimate purpose. Always scope strictly
+    to the authenticated owner's own email.
+    """
+    def get(self, request):
         email, error_response = auth_middleware.authenticate_request(request)
         if error_response:
             print("[DEBUG CafeMyListView] Auth failed:", error_response.data)
             return error_response
- 
+
         response = cafes.get_my_cafes_handler(email, is_super_admin=False)
         print(f"[DEBUG CafeMyListView] get_my_cafes_handler response: {response}")
         if response.get("status") == "error":
