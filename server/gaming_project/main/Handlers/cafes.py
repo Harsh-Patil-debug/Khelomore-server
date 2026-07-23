@@ -1024,6 +1024,120 @@ def set_razorpay_password_handler(cafe_id, caller_email, new_password):
         return {"status": "error", "message": f"Failed to set Razorpay password: {e}"}
 
 
+def forgot_razorpay_password_handler(cafe_id, caller_email):
+    """
+    Sends a reset OTP to the cafe owner's own account email, so a forgotten Razorpay
+    password is no longer a permanent lockout. caller_email must already match this
+    cafe's actual owner_email (an active authenticated session as that specific owner) —
+    not a super-admin bypass, since the OTP is only meaningful to whoever actually reads
+    that owner's inbox. Uses its own OTP fields (razorpay_reset_*), separate from a
+    regular login-password reset's, so requesting one never disrupts the other.
+    """
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        cafe = db_main.cafes.find_one({"_id": ObjectId(cafe_id)})
+        if not cafe:
+            return {"status": "error", "message": "Cafe not found."}
+        owner_email = (cafe.get("owner_email") or "").strip().lower()
+        if caller_email != owner_email:
+            return {"status": "error", "message": "Only this cafe's owner can reset its Razorpay password."}
+
+        admin = db_main.admins.find_one({"email": owner_email})
+        if not admin:
+            return {"status": "error", "message": "Owner account not found."}
+
+        from datetime import datetime, timedelta, timezone
+        from .auth_handler import IST, OTP_EXPIRY_MINUTES, OTP_RESEND_COOLDOWN_SECONDS
+        import random
+
+        prev_expiry = admin.get("razorpay_reset_otp_expiry")
+        if prev_expiry:
+            if prev_expiry.tzinfo is None:
+                prev_expiry = prev_expiry.replace(tzinfo=timezone.utc).astimezone(IST)
+            last_sent = prev_expiry - timedelta(minutes=OTP_EXPIRY_MINUTES)
+            elapsed = (datetime.now(IST) - last_sent).total_seconds()
+            if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
+                wait_for = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
+                return {"status": "error", "message": f"Please wait {wait_for}s before requesting another code."}
+
+        otp_code = str(random.randint(100000, 999999))
+        otp_expiry = datetime.now(IST) + timedelta(minutes=OTP_EXPIRY_MINUTES)
+        db_main.admins.update_one(
+            {"_id": admin["_id"]},
+            {"$set": {"razorpay_reset_otp_code": otp_code, "razorpay_reset_otp_expiry": otp_expiry},
+             "$unset": {"razorpay_reset_otp_attempts": ""}}
+        )
+        gamertag = admin.get("gamertag") or "PLAYER"
+        from .email_handler import send_otp_email
+        send_otp_email(owner_email, otp_code, gamertag=gamertag, purpose="password_reset")
+        return {"status": "success", "message": "A reset code has been sent to your account email."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to send reset code: {e}"}
+
+
+def reset_razorpay_password_handler(cafe_id, caller_email, otp_code, new_password):
+    """Verifies the razorpay_reset OTP and sets a new Razorpay password, overwriting any
+    existing one — the actual recovery step forgot_razorpay_password_handler sets up."""
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        cafe = db_main.cafes.find_one({"_id": ObjectId(cafe_id)})
+        if not cafe:
+            return {"status": "error", "message": "Cafe not found."}
+        owner_email = (cafe.get("owner_email") or "").strip().lower()
+        if caller_email != owner_email:
+            return {"status": "error", "message": "Only this cafe's owner can reset its Razorpay password."}
+
+        from . import input_validation
+        pw_error = input_validation.validate_password_strength(new_password or "")
+        if pw_error:
+            return {"status": "error", "message": pw_error}
+
+        admin = db_main.admins.find_one({"email": owner_email})
+        if not admin:
+            return {"status": "error", "message": "Owner account not found."}
+
+        stored_otp = admin.get("razorpay_reset_otp_code")
+        otp_exp = admin.get("razorpay_reset_otp_expiry")
+        if not stored_otp or not otp_exp:
+            return {"status": "error", "message": "No reset request found. Please request a new code."}
+
+        from datetime import datetime, timezone
+        from .auth_handler import IST, MAX_OTP_ATTEMPTS, ph
+        if otp_exp.tzinfo is None:
+            otp_exp = otp_exp.replace(tzinfo=timezone.utc).astimezone(IST)
+        if datetime.now(IST) > otp_exp:
+            return {"status": "error", "message": "Reset code has expired. Please request a new one."}
+
+        if stored_otp != (otp_code or "").strip():
+            attempts = int(admin.get("razorpay_reset_otp_attempts", 0)) + 1
+            if attempts >= MAX_OTP_ATTEMPTS:
+                db_main.admins.update_one(
+                    {"_id": admin["_id"]},
+                    {"$unset": {"razorpay_reset_otp_code": "", "razorpay_reset_otp_expiry": "", "razorpay_reset_otp_attempts": ""}}
+                )
+                return {"status": "error", "message": "Too many incorrect attempts. Please request a new code."}
+            db_main.admins.update_one({"_id": admin["_id"]}, {"$set": {"razorpay_reset_otp_attempts": attempts}})
+            return {"status": "error", "message": "Invalid reset code."}
+
+        db_main.admins.update_one(
+            {"_id": admin["_id"]},
+            {
+                "$set": {"razorpay_password_hash": ph.hash(new_password)},
+                "$unset": {
+                    "razorpay_reset_otp_code": "", "razorpay_reset_otp_expiry": "", "razorpay_reset_otp_attempts": "",
+                    "razorpay_password_locked_until": "", "razorpay_password_attempts": "",
+                },
+            },
+        )
+        return {"status": "success", "message": "Razorpay password reset successfully."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to reset Razorpay password: {e}"}
+
+
 def verify_razorpay_password_handler(cafe_id, caller_email, password):
     """
     The actual unlock check. A super admin viewing someone else's cafe (caller_email !=

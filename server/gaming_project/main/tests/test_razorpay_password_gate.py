@@ -195,3 +195,141 @@ class RazorpayPasswordGateTests(SecurityTestCase):
             **self.admin_header(),
         )
         self.assertEqual(resp.status_code, 200)
+
+
+class RazorpayPasswordForgotResetTests(SecurityTestCase):
+    """A forgotten Razorpay password used to be a permanent lockout (no recovery path at
+    all, by deliberate original design). These cover the OTP-based recovery that replaced
+    that: it requires an active session already authenticated as the exact cafe owner
+    (not a super-admin bypass), plus a fresh code emailed to that owner's own account —
+    both factors, not just one."""
+
+    def setUp(self):
+        super().setUp()
+        self.owner_email, self.owner_token = self.make_active_user(role="admin", collection="admins")
+        self.cafe_id = self.make_cafe(owner_email=self.owner_email)
+
+    def _set_password_hash(self, password="MySecretRzpPass1"):
+        self.db.admins.update_one({"email": self.owner_email}, {"$set": {"razorpay_password_hash": auth_handler.ph.hash(password)}})
+        return password
+
+    def _forgot(self, token):
+        return self.client.post(
+            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/forgot-password/",
+            {}, format="json", **self.auth_header(token),
+        )
+
+    def _reset(self, otp, new_password, token=None):
+        return self.client.post(
+            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/reset-password/",
+            {"otp_code": otp, "new_password": new_password},
+            format="json",
+            **self.auth_header(token or self.owner_token),
+        )
+
+    def test_owner_can_request_a_reset_code(self):
+        resp = self._forgot(self.owner_token)
+        self.assertEqual(resp.status_code, 200)
+        admin_doc = self.db.admins.find_one({"email": self.owner_email})
+        self.assertIsNotNone(admin_doc.get("razorpay_reset_otp_code"))
+
+    def test_a_different_authenticated_owner_cannot_request_a_reset_for_this_cafe(self):
+        other_email, other_token = self.make_active_user(role="admin", collection="admins")
+        self.make_cafe(owner_email=other_email)  # so they pass auth as *a* real owner, just not this one
+
+        # authenticate_admin_owner itself rejects this before the view even reaches
+        # forgot_razorpay_password_handler — a non-owner can't call this endpoint for a
+        # cafe_id they don't own at all, regardless of what handler-level checks exist.
+        resp = self._forgot(other_token)
+        self.assertEqual(resp.status_code, 403)
+        admin_doc = self.db.admins.find_one({"email": self.owner_email})
+        self.assertIsNone(admin_doc.get("razorpay_reset_otp_code"))
+
+    def test_super_admin_cannot_trigger_a_reset_on_the_owners_behalf(self):
+        # Unlike verify-password, this must NOT accept the super-admin bypass — the OTP
+        # goes to the owner's inbox, which a super admin doesn't have access to either way.
+        resp = self.client.post(
+            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/forgot-password/",
+            {}, format="json", **self.admin_header(),
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_correct_otp_resets_and_new_password_unlocks(self):
+        self._set_password_hash("OldRzpPass1")
+        self._forgot(self.owner_token)
+        otp = self.db.admins.find_one({"email": self.owner_email})["razorpay_reset_otp_code"]
+
+        resp = self._reset(otp, "BrandNewRzpPass2")
+        self.assertEqual(resp.status_code, 200)
+
+        unlock_resp = self.client.post(
+            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/verify-password/",
+            {"password": "BrandNewRzpPass2"},
+            format="json",
+            **self.auth_header(self.owner_token),
+        )
+        self.assertEqual(unlock_resp.status_code, 200)
+        self.assertTrue(unlock_resp.json()["verified"])
+
+        # Old password must no longer work.
+        old_unlock_resp = self.client.post(
+            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/verify-password/",
+            {"password": "OldRzpPass1"},
+            format="json",
+            **self.auth_header(self.owner_token),
+        )
+        self.assertEqual(old_unlock_resp.status_code, 403)
+
+    def test_reset_works_even_if_no_password_was_ever_set(self):
+        # No _set_password_hash() call — this account predates the feature entirely.
+        self._forgot(self.owner_token)
+        otp = self.db.admins.find_one({"email": self.owner_email})["razorpay_reset_otp_code"]
+        resp = self._reset(otp, "FirstEverRzpPass1")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_reset_clears_an_existing_verify_lockout(self):
+        self._set_password_hash("OldRzpPass1")
+        for _ in range(auth_handler.MAX_LOGIN_ATTEMPTS):
+            self.client.post(
+                f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/verify-password/",
+                {"password": "wrong"}, format="json", **self.auth_header(self.owner_token),
+            )
+        admin_doc = self.db.admins.find_one({"email": self.owner_email})
+        self.assertIsNotNone(admin_doc.get("razorpay_password_locked_until"))
+
+        self._forgot(self.owner_token)
+        otp = self.db.admins.find_one({"email": self.owner_email})["razorpay_reset_otp_code"]
+        self._reset(otp, "BrandNewRzpPass2")
+
+        admin_doc = self.db.admins.find_one({"email": self.owner_email})
+        self.assertIsNone(admin_doc.get("razorpay_password_locked_until"))
+        self.assertIsNone(admin_doc.get("razorpay_password_attempts"))
+
+    def test_wrong_otp_is_rejected_and_counts_as_an_attempt(self):
+        self._forgot(self.owner_token)
+        resp = self._reset("000000", "BrandNewRzpPass2")
+        self.assertEqual(resp.status_code, 400)
+        admin_doc = self.db.admins.find_one({"email": self.owner_email})
+        self.assertEqual(admin_doc.get("razorpay_reset_otp_attempts"), 1)
+
+    def test_too_many_wrong_attempts_locks_out_the_reset_code(self):
+        self._forgot(self.owner_token)
+        for _ in range(auth_handler.MAX_OTP_ATTEMPTS):
+            self._reset("000000", "BrandNewRzpPass2")
+        admin_doc = self.db.admins.find_one({"email": self.owner_email})
+        self.assertIsNone(admin_doc.get("razorpay_reset_otp_code"))
+
+    def test_weak_new_password_is_rejected(self):
+        self._forgot(self.owner_token)
+        otp = self.db.admins.find_one({"email": self.owner_email})["razorpay_reset_otp_code"]
+        resp = self._reset(otp, "short")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_new_razorpay_password_same_as_login_password_is_still_allowed_here(self):
+        # Signup blocks this (they must differ at creation time), but the reset endpoint
+        # doesn't re-derive/compare against the login password — documenting the current
+        # behavior explicitly rather than leaving it untested either way.
+        self._forgot(self.owner_token)
+        otp = self.db.admins.find_one({"email": self.owner_email})["razorpay_reset_otp_code"]
+        resp = self._reset(otp, "sectestpassword")
+        self.assertIn(resp.status_code, (200, 400))

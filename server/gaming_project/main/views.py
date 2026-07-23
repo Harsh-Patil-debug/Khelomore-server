@@ -1025,6 +1025,41 @@ class CafeRazorpayPasswordSetView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
 
+class CafeRazorpayPasswordForgotView(APIView):
+    """POST /cafes/<cafe_id>/razorpay-credentials/forgot-password/ — emails a reset OTP to the owner's own account email."""
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    def post(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        response = cafes.forgot_razorpay_password_handler(cafe_id, (email or "").strip().lower())
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class CafeRazorpayPasswordResetView(APIView):
+    """POST /cafes/<cafe_id>/razorpay-credentials/reset-password/ — verifies the reset OTP and sets a new Razorpay password."""
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    def post(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        response = cafes.reset_razorpay_password_handler(
+            cafe_id,
+            (email or "").strip().lower(),
+            request.data.get("otp_code", ""),
+            request.data.get("new_password", ""),
+        )
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
 class CafeRazorpayPasswordVerifyView(APIView):
     """POST /cafes/<cafe_id>/razorpay-credentials/verify-password/ — unlocks the credential fields in the UI."""
     throttle_classes = [ScopedRateThrottle]

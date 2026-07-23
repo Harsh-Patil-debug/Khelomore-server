@@ -24,6 +24,8 @@ urlpatterns = [
     path('cafes/<str:cafe_id>/razorpay-credentials/', CafeRazorpayCredentialsView.as_view(), name='cafe_razorpay_credentials'),
     path('cafes/<str:cafe_id>/razorpay-credentials/password-status/', CafeRazorpayPasswordStatusView.as_view(), name='cafe_razorpay_password_status'),
     path('cafes/<str:cafe_id>/razorpay-credentials/set-password/', CafeRazorpayPasswordSetView.as_view(), name='cafe_razorpay_password_set'),
+    path('cafes/<str:cafe_id>/razorpay-credentials/forgot-password/', CafeRazorpayPasswordForgotView.as_view(), name='cafe_razorpay_password_forgot'),
+    path('cafes/<str:cafe_id>/razorpay-credentials/reset-password/', CafeRazorpayPasswordResetView.as_view(), name='cafe_razorpay_password_reset'),
     path('cafes/<str:cafe_id>/razorpay-credentials/verify-password/', CafeRazorpayPasswordVerifyView.as_view(), name='cafe_razorpay_password_verify'),
     path('cafes/<str:cafe_id>/payments/create-order/', CafeBookingOrderCreateView.as_view(), name='cafe_booking_order_create'),
 
