@@ -526,19 +526,21 @@ class KheloMoreUpdatePhoneView(APIView):
     """
     POST /auth/update-phone/
     Header: Authorization: Bearer <token>
-    Body: { phone, iv } (AES-CBC encrypted phone)
+    Body: { phone, iv, role } (phone is AES-CBC encrypted; role is plaintext, same as register/login)
     Returns: encrypted { message, user }
     """
     def post(self, request):
         email, error_response = auth_middleware.authenticate_request(request)
         if error_response:
             return error_response
-            
+
         data = request.data
         result, status_code = auth_handler.khelomore_update_phone(
             email           = email,
             phone_encrypted = data.get("phone", ""),
             iv              = data.get("iv", ""),
+            is_admin        = check_is_admin(request),
+            role            = data.get("role", ""),
         )
         return Response(result, status=status_code)
 

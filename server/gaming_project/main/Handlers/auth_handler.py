@@ -760,7 +760,7 @@ def khelomore_google_auth_code_verify(code: str, is_admin=False, role=""):
         return {"error": f"Google login failed: {str(e)}"}, 500
 
 
-def khelomore_update_phone(email, phone_encrypted, iv):
+def khelomore_update_phone(email, phone_encrypted, iv, is_admin=False, role=""):
     """Updates a user's phone number securely."""
     try:
         dec_phone = decrypt_data(phone_encrypted, iv).strip()
@@ -771,11 +771,12 @@ def khelomore_update_phone(email, phone_encrypted, iv):
     if error:
         return {"error": error}, 400
 
-    coll = db_main.website_users
+    # Route to the caller's own collection like every other auth handler does (see
+    # get_user_collection) instead of guessing by trying website_users then users — that
+    # guess silently wrote to the wrong document whenever the same email existed in both
+    # collections (e.g. someone with both a mobile account and a website account).
+    coll = get_user_collection(is_admin, role)
     user = coll.find_one({"email": email})
-    if not user:
-        coll = db_main.users
-        user = coll.find_one({"email": email})
     if not user:
         return {"error": "User not found."}, 404
 
