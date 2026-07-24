@@ -121,16 +121,23 @@ def list_sessions_handler(cafe_id: str):
             slots = b.get("slots", [])
             earliest_start, latest_end = parse_slot_times(b.get("date"), slots)
 
-            # Sync rig status to most urgent booking ONLY if the slot is currently active/running!
-            is_active_time = (b.get("date") == today_str and earliest_start <= now <= latest_end)
-            
+            # Sync rig status to today's booking — the housekeeping pass above already
+            # auto-expires (marks Completed) anything whose slot window has already ended,
+            # so any "Upcoming" booking still in this list for today is either happening
+            # right now or later today, and either way the rig must show as reserved: the
+            # Systems page and the Live Floor summary tiles both read rigs.status directly,
+            # so leaving it "available" for a same-day booking that just hasn't started yet
+            # let the owner double-book or assign a walk-in onto an already-reserved PC.
+            is_today = (b.get("date") == today_str)
+
             if b_status == "Active":
                 # Active session always marks rig as occupied
                 if matched_rig.get("status") != "maintenance":
                     db_main.rigs.update_one({"_id": matched_rig["_id"]}, {"$set": {"status": "occupied"}})
                     matched_rig["status"] = "occupied"
-            elif b_status == "Upcoming" and is_active_time:
-                # Upcoming booking only marks rig as reserved if we are currently in the slot time
+            elif b_status == "Upcoming" and is_today:
+                # Any of today's upcoming bookings mark the rig as reserved, whether the
+                # slot has started yet or not.
                 if matched_rig.get("status") not in ["occupied", "maintenance"]:
                     db_main.rigs.update_one({"_id": matched_rig["_id"]}, {"$set": {"status": "reserved"}})
                     matched_rig["status"] = "reserved"
