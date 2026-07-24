@@ -30,6 +30,15 @@ def parse_slot_times(date_str: str, slots: list) -> tuple:
         return default_start, default_end
     return min(start_times), max(end_times)
 def calculate_booking_status_and_time(date_str: str, slots: list, db_status: str = "Upcoming", actual_end_at=None) -> tuple:
+    """
+    SECURITY/UX: completion is admin-only, via end_session_handler — this must never
+    derive "Completed" purely from the slot's scheduled end time having passed for a
+    same-day booking. It used to, which raced against Live Floor (which shows the real
+    db_status) — a booking would flip to "Completed" here the instant the clock passed
+    its slot end even though the admin never actually ended it, while Live Floor kept
+    showing it Reserved/Active until it was manually ended. A booking from an earlier
+    calendar day is unambiguous either way, so that one case still auto-resolves.
+    """
     # 0. If the database already has a final status (Completed/Cancelled), respect it!
     if db_status in ["Completed", "Cancelled", "completed", "cancelled"]:
         return "Completed" if db_status.lower() == "completed" else "Cancelled", 0
@@ -45,18 +54,17 @@ def calculate_booking_status_and_time(date_str: str, slots: list, db_status: str
     try:
         earliest_start, latest_end = parse_slot_times(date_str, slots)
 
-        # 3. If slot end time has passed, it's Completed/Expired
-        if now > latest_end:
-            return "Completed", 0
-
-        # 4. If booking has been started manually by admin (status is "Active")
+        # 3. If booking has been started manually by admin (status is "Active")
         if db_status == "Active":
-            # Use actual_end_at from DB if set (synced timer), else fall back to slot end
+            # Use actual_end_at from DB if set (synced timer), else fall back to slot end.
+            # Elapsed time only clamps the displayed remaining time to 0 — it never flips
+            # the status away from Active on its own.
             end_time = actual_end_at if actual_end_at else latest_end
             remaining_seconds = int((end_time - now).total_seconds())
             return "Active", max(0, remaining_seconds)
 
-        # 5. Otherwise, even if the slot started, it stays Upcoming/Reserved until manual activation
+        # 4. Otherwise it stays Upcoming/Reserved — whether the slot hasn't started yet,
+        # is happening now, or is overdue and awaiting the admin's manual action.
         return "Upcoming", 0
 
     except Exception as e:
@@ -397,41 +405,7 @@ def get_user_bookings_handler(user_email: str, cafe_id: str = None, date: str = 
         bookings_list = []
         for b in bookings:
             b_id = str(b["_id"])
-            
-            # Auto-expire if end time has passed in the database view pass
             slots = b.get("slots", [])
-            date_str = b.get("date")
-            now = datetime.now(IST)
-            if slots and date_str:
-                _, latest_end = parse_slot_times(date_str, slots)
-                
-                should_expire = False
-                b_status = b.get("status")
-                if b_status == "Active":
-                    actual_end_raw = b.get("actual_end_at")
-                    if actual_end_raw:
-                        try:
-                            actual_end_dt = datetime.fromisoformat(actual_end_raw)
-                            if actual_end_dt.tzinfo is None:
-                                actual_end_dt = actual_end_dt.replace(tzinfo=IST)
-                            should_expire = (now > actual_end_dt)
-                        except Exception:
-                            should_expire = (now > latest_end)
-                    else:
-                        should_expire = (now > latest_end)
-                elif b_status == "Upcoming":
-                    should_expire = (now > latest_end)
-
-                if should_expire:
-                    db_main.bookings.update_one({"_id": b["_id"]}, {"$set": {"status": "Completed"}})
-                    b["status"] = "Completed"
-                    # Free rig status
-                    rig_name = b.get("rig", "").replace("•", "·").split("·")[0].strip()
-                    db_main.rigs.update_one(
-                        {"cafe_id": b["cafe_id"], "name": rig_name},
-                        {"$set": {"status": "available"}}
-                    )
-
             del b["_id"]
             
             if "createdAt" in b:

@@ -38,8 +38,15 @@ def parse_slot_times(date_str: str, slots: list) -> tuple:
 
 def list_sessions_handler(cafe_id: str):
     """
-    Returns all active and reserved sessions for a given cafe on the current date,
-    automatically expiring past/unstarted bookings.
+    Returns all active and reserved sessions for a given cafe on the current date.
+
+    A booking's scheduled slot end time is never, on its own, a reason to mark it
+    Completed — that used to happen automatically here the instant `now` passed the
+    slot's end, even for a booking the admin had never actually started (and for a
+    started session, even if the customer was still playing past the scheduled end).
+    Completion is admin-only now, via end_session_handler (the "End Session" button on
+    Live Floor) — a booking stays visible (Reserved if never started, Occupied if
+    started) until the admin explicitly ends it, no matter how much time has passed.
     """
     db_main = get_db()
     if db_main is None:
@@ -49,54 +56,15 @@ def list_sessions_handler(cafe_id: str):
         now = datetime.now(IST)
         today_str = now.strftime("%Y-%m-%d")
 
-        # 1. Housekeeping: Auto-expire past/completed bookings for today
-        bookings = list(db_main.bookings.find({
-            "cafe_id": cafe_id,
-            "date": today_str,
-            "status": {"$in": ["Active", "Upcoming"]}
-        }))
-
-        for b in bookings:
-            b_status = b.get("status")
-            slots = b.get("slots", [])
-            _, latest_end = parse_slot_times(today_str, slots)
-            
-            should_expire = False
-            if b_status == "Active":
-                actual_end_raw = b.get("actual_end_at")
-                if actual_end_raw:
-                    try:
-                        actual_end_dt = datetime.fromisoformat(actual_end_raw)
-                        if actual_end_dt.tzinfo is None:
-                            actual_end_dt = actual_end_dt.replace(tzinfo=IST)
-                        should_expire = (now > actual_end_dt)
-                    except Exception:
-                        should_expire = (now > latest_end)
-                else:
-                    should_expire = (now > latest_end)
-            else:
-                should_expire = (now > latest_end)
-
-            if should_expire:
-                # Slot has ended - automatically mark completed
-                db_main.bookings.update_one(
-                    {"_id": b["_id"]},
-                    {"$set": {"status": "Completed"}}
-                )
-                # Free corresponding rig status in DB
-                rig_name = b.get("rig", "").replace("•", "·").split("·")[0].strip()
-                db_main.rigs.update_one(
-                    {"cafe_id": cafe_id, "name": rig_name},
-                    {"$set": {"status": "available"}}
-                )
-
         # Reset non-maintenance rigs status to "available" initially so they are clean
+        # before being recomputed from currently-open bookings below — this is what lets
+        # a rig fall back to available once its booking is (manually) completed/cancelled.
         db_main.rigs.update_many(
             {"cafe_id": cafe_id, "status": {"$ne": "maintenance"}},
             {"$set": {"status": "available"}}
         )
 
-        # 2. Re-fetch current bookings & rigs (including future bookings)
+        # Re-fetch current bookings & rigs (including future bookings)
         bookings = list(db_main.bookings.find({
             "cafe_id": cafe_id,
             "status": {"$in": ["Active", "Upcoming"]}
@@ -121,13 +89,13 @@ def list_sessions_handler(cafe_id: str):
             slots = b.get("slots", [])
             earliest_start, latest_end = parse_slot_times(b.get("date"), slots)
 
-            # Sync rig status to today's booking — the housekeeping pass above already
-            # auto-expires (marks Completed) anything whose slot window has already ended,
-            # so any "Upcoming" booking still in this list for today is either happening
-            # right now or later today, and either way the rig must show as reserved: the
-            # Systems page and the Live Floor summary tiles both read rigs.status directly,
-            # so leaving it "available" for a same-day booking that just hasn't started yet
-            # let the owner double-book or assign a walk-in onto an already-reserved PC.
+            # Sync rig status to today's booking. Nothing auto-completes a booking anymore
+            # (see list_sessions_handler's docstring), so an "Upcoming" booking still in
+            # this list for today is either happening right now, later today, or overdue
+            # and awaiting the admin's manual action — all three cases must still show the
+            # rig as reserved: the Systems page and the Live Floor summary tiles both read
+            # rigs.status directly, so leaving it "available" would let the owner
+            # double-book or assign a walk-in onto an already-reserved PC.
             is_today = (b.get("date") == today_str)
 
             if b_status == "Active":
