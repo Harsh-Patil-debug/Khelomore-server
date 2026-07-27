@@ -910,7 +910,9 @@ class CafeRestoreView(APIView):
 class CafeSubscriptionDetailView(APIView):
     """GET /cafes/<cafe_id>/subscription/ — Current status + payment history (owner or super admin)."""
     def get(self, request, cafe_id):
-        email, error_response = authenticate_admin_owner(request, cafe_id)
+        # allow_when_suspended: an owner needs to see their own subscription/lockout
+        # state and payment history precisely BECAUSE they're suspended.
+        email, error_response = authenticate_admin_owner(request, cafe_id, allow_when_suspended=True)
         if error_response:
             return error_response
         response, status_code = subscriptions.get_cafe_subscription_handler(cafe_id)
@@ -920,7 +922,9 @@ class CafeSubscriptionDetailView(APIView):
 class CafeSubscriptionOrderView(APIView):
     """POST /cafes/<cafe_id>/subscription/create-order/ — Create a ₹1599 Razorpay order for this cafe's next payment."""
     def post(self, request, cafe_id):
-        email, error_response = authenticate_admin_owner(request, cafe_id)
+        # allow_when_suspended: this IS the recovery path — a suspended owner must be
+        # able to create a payment order to pay their way back in.
+        email, error_response = authenticate_admin_owner(request, cafe_id, allow_when_suspended=True)
         if error_response:
             return error_response
         response, status_code = subscriptions.create_subscription_order_handler(cafe_id)
@@ -930,7 +934,7 @@ class CafeSubscriptionOrderView(APIView):
 class CafeSubscriptionTrialWelcomeShownView(APIView):
     """POST /cafes/<cafe_id>/subscription/trial-welcome-shown/ — Marks the one-time "welcome to your free trial" popup as seen, so it never shows again for this cafe."""
     def post(self, request, cafe_id):
-        email, error_response = authenticate_admin_owner(request, cafe_id)
+        email, error_response = authenticate_admin_owner(request, cafe_id, allow_when_suspended=True)
         if error_response:
             return error_response
         response, status_code = subscriptions.mark_trial_welcome_shown_handler(cafe_id)
@@ -940,7 +944,9 @@ class CafeSubscriptionTrialWelcomeShownView(APIView):
 class CafeSubscriptionVerifyView(APIView):
     """POST /cafes/<cafe_id>/subscription/verify/ — Verify the Razorpay payment and extend the due date."""
     def post(self, request, cafe_id):
-        email, error_response = authenticate_admin_owner(request, cafe_id)
+        # allow_when_suspended: verifying the payment that lifts the suspension must
+        # itself work while still suspended, or paying could never actually unlock them.
+        email, error_response = authenticate_admin_owner(request, cafe_id, allow_when_suspended=True)
         if error_response:
             return error_response
         data = request.data
@@ -1183,17 +1189,25 @@ class UserFavoritesView(APIView):
         return Response(result, status=status_code)
 
 
-def authenticate_admin_owner(request, cafe_id):
+def authenticate_admin_owner(request, cafe_id, allow_when_suspended=False):
     """
     Validates that the request is authenticated by:
     1. A JWT token belonging to the owner of the specified cafe, OR
     2. A super admin token (static or dynamic super_admin JWT).
     Returns (email, None) if successful.
     Returns (None, Response) if unauthorized or forbidden.
+
+    SECURITY: a cafe whose subscription is suspended (past its grace period, unpaid) is
+    rejected here too, for every endpoint except the subscription/payment views
+    themselves (allow_when_suspended=True) — this was previously enforced ONLY by the
+    frontend's own redirect (cafe-command-center's AuthGate/SuspendedLockout), which a
+    direct API call bypasses entirely, letting a suspended cafe keep operating exactly
+    as if it had paid. Super admins are never blocked by this — they need to be able to
+    manage/inspect a suspended cafe regardless.
     """
     from .Handlers.db_connection import get_db
     from bson import ObjectId
-    
+
     db = get_db()
     if not db:
         return None, Response({"status": "error", "message": "Database offline"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -1211,10 +1225,15 @@ def authenticate_admin_owner(request, cafe_id):
         try:
             cafe = db.cafes.find_one({"_id": ObjectId(cafe_id), "is_deleted": {"$ne": True}})
             if cafe and cafe.get("owner_email") == email:
+                if not allow_when_suspended and cafes._effective_cafe_status(cafe) == "suspended":
+                    return None, Response(
+                        {"status": "error", "message": "Your subscription is past due. Please renew to regain access."},
+                        status=status.HTTP_402_PAYMENT_REQUIRED,
+                    )
                 return email, None
         except Exception:
             pass
-        
+
     return None, Response({"status": "error", "message": "Unauthorized: You do not own this cafe"}, status=status.HTTP_403_FORBIDDEN)
 
 
