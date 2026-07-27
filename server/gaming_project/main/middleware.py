@@ -2,7 +2,7 @@
 # CSRF-style protection for cookie-authenticated requests.
 #
 # DRF's APIView bypasses Django's built-in CsrfViewMiddleware by design, and this app's
-# auth cookies (km_gamer_token / km_website_token / km_admin_token / km_super_admin_token)
+# auth cookies (bmc_gamer_token / bmc_website_token / bmc_admin_token / bmc_super_admin_token)
 # are set with SameSite=None so they are sent on cross-site requests too (required because
 # the web frontends live on separate origins from this API). Without this middleware, any
 # website could trigger authenticated state-changing requests using a logged-in visitor's
@@ -16,7 +16,7 @@ from django.conf import settings
 from django.http import JsonResponse
 
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-AUTH_COOKIE_NAMES = ("km_gamer_token", "km_website_token", "km_admin_token", "km_super_admin_token")
+AUTH_COOKIE_NAMES = ("bmc_gamer_token", "bmc_website_token", "bmc_admin_token", "bmc_super_admin_token")
 
 
 class OriginValidationMiddleware:

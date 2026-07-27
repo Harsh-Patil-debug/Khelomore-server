@@ -1,5 +1,5 @@
 # tournaments.py
-# Handlers for managing esports tournaments in KheloMore Gaming Hub
+# Handlers for managing esports tournaments in BookMyConsole Gaming Hub
 
 import os
 import json
@@ -15,7 +15,7 @@ from . import input_validation
 # Configure Cloudinary
 cloudinary_secret = os.getenv("CLOUDINARY_API_SECRET")
 if not cloudinary_secret or cloudinary_secret == "your_api_secret_placeholder":
-    print("[KheloMore Warning] CLOUDINARY_API_SECRET environment variable is not set. Image uploads to Cloudinary will fail and fallback to default images.")
+    print("[BookMyConsole Warning] CLOUDINARY_API_SECRET environment variable is not set. Image uploads to Cloudinary will fail and fallback to default images.")
     cloudinary_secret = "your_api_secret_placeholder"
 
 cloudinary.config(
@@ -111,7 +111,7 @@ def toggle_registration_handler(tournament_id):
         doc["registration_open"] = new_value
 
         action = "opened" if new_value else "closed"
-        print(f"[KheloMore] Admin {action} registration for: '{doc.get('title')}'")
+        print(f"[BookMyConsole] Admin {action} registration for: '{doc.get('title')}'")
 
         return {"status": "success", "tournament": map_tournament_doc(doc)}
     except Exception as e:
@@ -318,7 +318,7 @@ def register_tournament_handler(tournament_id, user_email, data):
         return {"status": "success", "tournament": map_tournament_doc(updated_tournament)}
 
     except Exception as e:
-        print(f"[KheloMore] Failed to register for tournament: {e}")
+        print(f"[BookMyConsole] Failed to register for tournament: {e}")
         print(traceback.format_exc())
         return {"status": "error", "message": f"Failed to register: {e}"}
 
@@ -446,7 +446,7 @@ def update_tournament_handler(tournament_id, data, files=None):
         return {"status": "success", "tournament": map_tournament_doc(updated_doc)}
 
     except Exception as e:
-        print(f"[KheloMore] Failed to update tournament: {e}")
+        print(f"[BookMyConsole] Failed to update tournament: {e}")
         print(traceback.format_exc())
         return {"status": "error", "message": f"Failed to update tournament: {e}"}
 
@@ -469,12 +469,12 @@ def delete_tournament_handler(tournament_id):
 
         # Delete all registrations referencing this tournament
         delete_regs = db_main.registrations.delete_many({"tournament_id": oid})
-        print(f"[KheloMore] Deleted tournament '{existing.get('title')}' and cleared {delete_regs.deleted_count} registrations.")
+        print(f"[BookMyConsole] Deleted tournament '{existing.get('title')}' and cleared {delete_regs.deleted_count} registrations.")
 
         return {"status": "success", "message": "Tournament and associated registrations deleted successfully."}
 
     except Exception as e:
-        print(f"[KheloMore] Failed to delete tournament: {e}")
+        print(f"[BookMyConsole] Failed to delete tournament: {e}")
         print(traceback.format_exc())
         return {"status": "error", "message": f"Failed to delete tournament: {e}"}
 
@@ -543,6 +543,6 @@ def get_tournament_registrations_handler(tournament_id):
         }, 200
 
     except Exception as e:
-        print(f"[KheloMore] Failed to fetch tournament registrations: {e}")
+        print(f"[BookMyConsole] Failed to fetch tournament registrations: {e}")
         print(traceback.format_exc())
         return {"status": "error", "message": f"Failed to fetch registrations: {e}"}, 500

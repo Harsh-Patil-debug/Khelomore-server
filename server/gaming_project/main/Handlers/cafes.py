@@ -34,7 +34,7 @@ DEFAULT_SLOTS = [
 # Configure Cloudinary
 cloudinary_secret = os.getenv("CLOUDINARY_API_SECRET")
 if not cloudinary_secret or cloudinary_secret == "your_api_secret_placeholder":
-    print("[KheloMore Warning] CLOUDINARY_API_SECRET environment variable is not set. Image uploads to Cloudinary will fail and fallback to default images.")
+    print("[BookMyConsole Warning] CLOUDINARY_API_SECRET environment variable is not set. Image uploads to Cloudinary will fail and fallback to default images.")
     cloudinary_secret = "your_api_secret_placeholder"
 
 cloudinary.config(
@@ -219,7 +219,7 @@ def generate_slots_from_hours(operating_hours):
             
         return slots if slots else DEFAULT_SLOTS
     except Exception as e:
-        print(f"[KheloMore Error] Failed to generate slots: {e}")
+        print(f"[BookMyConsole Error] Failed to generate slots: {e}")
         return DEFAULT_SLOTS
 
 
@@ -355,7 +355,7 @@ def get_cafes_handler(latitude=None, longitude=None, include_deleted=False):
         # Auto-seeding disabled to prevent mock cafes from populating
         # if db_main.cafes.count_documents({}) == 0:
         #     db_main.cafes.insert_many(SEED_CAFES)
-        #     print("[KheloMore] Database seeded with default gaming cafes.")
+        #     print("[BookMyConsole] Database seeded with default gaming cafes.")
         pass
 
         # Parse request coordinates if present
@@ -1221,7 +1221,7 @@ def delete_cafe_handler(cafe_id):
         )
         if result.matched_count == 0:
             return {"status": "error", "message": "Cafe not found or already deleted."}
-        print(f"[KheloMore] Cafe {cafe_id} soft-deleted from database.")
+        print(f"[BookMyConsole] Cafe {cafe_id} soft-deleted from database.")
         return {"status": "success", "message": "Cafe successfully removed from the network."}
     except Exception as e:
         return {"status": "error", "message": f"Failed to delete cafe: {e}"}
@@ -1239,7 +1239,7 @@ def restore_cafe_handler(cafe_id):
         )
         if result.matched_count == 0:
             return {"status": "error", "message": "Cafe not found."}
-        print(f"[KheloMore] Cafe {cafe_id} successfully restored.")
+        print(f"[BookMyConsole] Cafe {cafe_id} successfully restored.")
         return {"status": "success", "message": "Cafe successfully restored to the network."}
     except Exception as e:
         return {"status": "error", "message": f"Failed to restore cafe: {e}"}

@@ -1,5 +1,5 @@
 """
-WSGI config for KheloMore Gaming Hub.
+WSGI config for BookMyConsole Gaming Hub.
 """
 
 import os

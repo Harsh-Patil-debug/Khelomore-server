@@ -24,7 +24,7 @@ import hmac
 import os
 import sys
 
-sys.path.append(r"C:\Users\DELL\OneDrive\Desktop\khelomore-server\server")
+sys.path.append(r"C:\Users\DELL\OneDrive\Desktop\bookmyconsole-server\server")
 
 # SAFETY: isolate from real data, same convention as manage.py's `test` routing and
 # verify_super_admin.py's existing precedent in this repo.

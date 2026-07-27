@@ -29,7 +29,7 @@ class FloorSessionRigStatusSyncTests(SecurityTestCase):
 
         today_str = datetime.now(IST).strftime("%Y-%m-%d")
         doc = {
-            "user_email": "walkin@khelomore.com", "user_name": "SECTEST",
+            "user_email": "walkin@bookmyconsole.com", "user_name": "SECTEST",
             "cafe_id": cafe_id, "cafe_name": "Sectest Cafe", "zone": "Standard",
             "date": today_str, "slots": ["11:58 PM - 11:59 PM"], "slot": "11:58 PM - 11:59 PM",
             "price": 80, "code": "123456", "rig": "PC #01", "status": "Upcoming",
@@ -50,7 +50,7 @@ class FloorSessionRigStatusSyncTests(SecurityTestCase):
         self._make_rig(cafe_id)
 
         doc = {
-            "user_email": "walkin@khelomore.com", "user_name": "SECTEST",
+            "user_email": "walkin@bookmyconsole.com", "user_name": "SECTEST",
             "cafe_id": cafe_id, "cafe_name": "Sectest Cafe", "zone": "Standard",
             "date": "2099-01-01", "slots": ["10:00 AM - 11:00 AM"], "slot": "10:00 AM - 11:00 AM",
             "price": 80, "code": "123456", "rig": "PC #01", "status": "Upcoming",

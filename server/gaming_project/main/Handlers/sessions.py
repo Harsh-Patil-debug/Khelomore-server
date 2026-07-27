@@ -253,7 +253,7 @@ def start_session_handler(booking_id: str = None, data: dict = None):
             code = str(random.randint(100000, 999999))
             
             booking_doc = {
-                "user_email": "walkin@khelomore.com",
+                "user_email": "walkin@bookmyconsole.com",
                 "user_name": customer_name,
                 "cafe_id": rig["cafe_id"],
                 "cafe_name": cafe_name,

@@ -363,7 +363,7 @@ def get_all_subscriptions_handler():
 def get_all_subscription_payments_handler():
     """
     Super-admin-only: every subscription payment ever recorded, across all cafes — this
-    is the platform's actual recurring-revenue ledger (real money KheloMore itself earns),
+    is the platform's actual recurring-revenue ledger (real money BookMyConsole itself earns),
     as distinct from booking payments, which route to each cafe's own Razorpay account
     (or the platform's fallback account, pending payout to the cafe) and are never
     platform revenue. For the Payments page.

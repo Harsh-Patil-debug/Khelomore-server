@@ -1,5 +1,5 @@
 """
-KheloMore Gaming Hub — Email Handler
+BookMyConsole Gaming Hub — Email Handler
 ──────────────────────────────────────────────────────────────────────────────
 Sends OTP and welcome emails via Brevo's HTTP transactional email API.
 
@@ -29,7 +29,7 @@ BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
 # display name) if EMAIL_SENDER isn't set, for compatibility with the old SMTP-era var.
 _parsed_name, _parsed_email = parseaddr(os.getenv("EMAIL_SENDER", ""))
 SENDER_EMAIL = _parsed_email or os.getenv("EMAIL_HOST_USER", "")
-SENDER_NAME = _parsed_name or "KheloMore Gaming Hub"
+SENDER_NAME = _parsed_name or "BookMyConsole Gaming Hub"
 
 
 def _send_email(recipient: str, subject: str, html_body: str) -> bool:
@@ -74,7 +74,7 @@ def send_otp_email(recipient: str, otp: str, gamertag: str = "PLAYER", purpose: 
     # ever touching their inbox. Only print in local dev (DEBUG=True).
     if settings.DEBUG:
         print("\n" + "=" * 55)
-        print(f"[KHELOMORE] OTP INTERCEPTED — {purpose.upper()}")
+        print(f"[BOOKMYCONSOLE] OTP INTERCEPTED — {purpose.upper()}")
         print(f"  Player  : {gamertag}")
         print(f"  Email   : {recipient}")
         print(f"  OTP Code: {otp}")
@@ -86,7 +86,7 @@ def send_otp_email(recipient: str, otp: str, gamertag: str = "PLAYER", purpose: 
         action_label = "Password Reset"
     else:
         action_label = "Login"
-    subject = f"KheloMore — Your {action_label} Verification Code: {otp}"
+    subject = f"BookMyConsole — Your {action_label} Verification Code: {otp}"
 
     html_body = f"""
     <html>
@@ -100,7 +100,7 @@ def send_otp_email(recipient: str, otp: str, gamertag: str = "PLAYER", purpose: 
             <tr>
               <td align="center" style="background:#0B0C10;padding:36px 0 24px;">
                 <p style="margin:0;font-size:11px;letter-spacing:6px;color:#E11D2E;text-transform:uppercase;">
-                  ⚡ KHELOMORE GAMING HUB ⚡
+                  ⚡ BOOKMYCONSOLE GAMING HUB ⚡
                 </p>
                 <h1 style="margin:10px 0 0;font-size:28px;letter-spacing:4px;color:#ffffff;text-transform:uppercase;">
                   ACCESS CODE
@@ -137,7 +137,7 @@ def send_otp_email(recipient: str, otp: str, gamertag: str = "PLAYER", purpose: 
                   SECURE AUTH · AES-256 ENCRYPTED TRANSIT · SHA-256
                 </p>
                 <p style="margin:6px 0 0;font-size:9px;color:#374151;">
-                  © 2026 KheloMore Gaming Hub. All rights reserved.
+                  © 2026 BookMyConsole Gaming Hub. All rights reserved.
                 </p>
               </td>
             </tr>
@@ -154,7 +154,7 @@ def send_otp_email(recipient: str, otp: str, gamertag: str = "PLAYER", purpose: 
 
 def send_welcome_email(recipient: str, gamertag: str = "PLAYER") -> bool:
     """Sends a welcome email after a player's account is verified and activated."""
-    subject = "Welcome to KheloMore Gaming Hub ⚡"
+    subject = "Welcome to BookMyConsole Gaming Hub ⚡"
 
     html_body = f"""
     <html>
@@ -165,7 +165,7 @@ def send_welcome_email(recipient: str, gamertag: str = "PLAYER") -> bool:
                  style="background:#0E0E12;border:1px solid #E11D2E;border-radius:16px;overflow:hidden;">
             <tr>
               <td align="center" style="background:#0B0C10;padding:40px 0 28px;">
-                <p style="margin:0;font-size:11px;letter-spacing:6px;color:#E11D2E;">⚡ KHELOMORE GAMING HUB ⚡</p>
+                <p style="margin:0;font-size:11px;letter-spacing:6px;color:#E11D2E;">⚡ BOOKMYCONSOLE GAMING HUB ⚡</p>
                 <h1 style="margin:10px 0 0;font-size:26px;letter-spacing:4px;color:#ffffff;text-transform:uppercase;">
                   WELCOME, OPERATOR
                 </h1>
@@ -189,7 +189,7 @@ def send_welcome_email(recipient: str, gamertag: str = "PLAYER") -> bool:
             <tr>
               <td align="center" style="border-top:1px solid #1f1f28;padding:20px 40px;">
                 <p style="margin:0;font-size:9px;letter-spacing:3px;color:#374151;text-transform:uppercase;">
-                  © 2026 KheloMore Gaming Hub · All rights reserved
+                  © 2026 BookMyConsole Gaming Hub · All rights reserved
                 </p>
               </td>
             </tr>
@@ -211,7 +211,7 @@ def send_admin_otp_email(recipient: str, otp: str, name: str = "Admin") -> bool:
 
 
 def send_sms_otp(phone_number: str, otp: str) -> bool:
-    """SMS OTP stub — always succeeds (no Twilio configured for KheloMore)."""
+    """SMS OTP stub — always succeeds (no Twilio configured for BookMyConsole)."""
     if settings.DEBUG:
         print(f"[SMS OTP STUB] {phone_number} → {otp}")
     return True

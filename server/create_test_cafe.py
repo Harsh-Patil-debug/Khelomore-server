@@ -159,7 +159,7 @@ def create_cafe():
         try:
             from geopy.geocoders import Nominatim
             print("Resolving coordinates automatically using geopy Nominatim...")
-            geolocator = Nominatim(user_agent="khelomore_super_admin")
+            geolocator = Nominatim(user_agent="bookmyconsole_super_admin")
             query = f"{address}, {city}" if city else address
             loc = geolocator.geocode(query, timeout=10)
             if loc:

@@ -1,5 +1,5 @@
 """
-KheloMore Gaming Hub — API Views
+BookMyConsole Gaming Hub — API Views
 ─────────────────────────────────────────────────────────────────────────────
 All views are thin wrappers. Business logic lives exclusively in Handlers/.
 Each View calls a handler function and returns the result as a DRF Response.
@@ -157,7 +157,7 @@ def reject_unauthorized_super_admin_role(request, role):
             )
     return None
 
-class KheloMoreRegisterView(APIView):
+class BookMyConsoleRegisterView(APIView):
     """
     POST /auth/register/
     Body: { gamertag, email, password, iv, phone, role }  — all AES-CBC encrypted (except role)
@@ -175,7 +175,7 @@ class KheloMoreRegisterView(APIView):
         guard_error = reject_unauthorized_super_admin_role(request, role)
         if guard_error:
             return guard_error
-        result, status_code = auth_handler.khelomore_register(
+        result, status_code = auth_handler.bookmyconsole_register(
             gamertag          = data.get("gamertag", ""),
             email             = data.get("email", ""),
             password          = data.get("password", ""),
@@ -188,7 +188,7 @@ class KheloMoreRegisterView(APIView):
         return Response(result, status=status_code)
 
 
-class KheloMoreLoginView(APIView):
+class BookMyConsoleLoginView(APIView):
     """
     POST /auth/login/
     Body: { email, password, iv, role }           — AES-CBC encrypted (except role)
@@ -204,7 +204,7 @@ class KheloMoreLoginView(APIView):
         # (find_one + password check) — it can never create one, so there's no escalation
         # risk. Guarding it too would lock out every real super admin, since logging in
         # would then require already having super-admin credentials.
-        result, status_code = auth_handler.khelomore_login(
+        result, status_code = auth_handler.bookmyconsole_login(
             email    = data.get("email", ""),
             password = data.get("password", ""),
             iv       = data.get("iv", ""),
@@ -214,7 +214,7 @@ class KheloMoreLoginView(APIView):
         return Response(result, status=status_code)
 
 
-class KheloMoreVerifyOTPView(APIView):
+class BookMyConsoleVerifyOTPView(APIView):
     """
     POST /auth/verify-otp/
     Body: { email, otp_code, iv, role }           — AES-CBC encrypted (except role)
@@ -229,7 +229,7 @@ class KheloMoreVerifyOTPView(APIView):
         # No role guard here either — verify-otp only completes auth for an existing
         # pending doc (created by register, which IS guarded, or by login against an
         # existing account); it cannot itself create a super_admin document.
-        result, status_code = auth_handler.khelomore_verify_otp(
+        result, status_code = auth_handler.bookmyconsole_verify_otp(
             email    = data.get("email", ""),
             otp_code = data.get("otp_code", ""),
             iv       = data.get("iv", ""),
@@ -247,20 +247,20 @@ class KheloMoreVerifyOTPView(APIView):
                 
                 cookie_key = None
                 if user_role == "super_admin" or role == "super_admin":
-                    cookie_key = "km_super_admin_token"
+                    cookie_key = "bmc_super_admin_token"
                 elif user_role == "admin" or role == "admin" or check_is_admin(request):
-                    cookie_key = "km_admin_token"
+                    cookie_key = "bmc_admin_token"
                 elif user_role == "website_user" or role == "website_user":
-                    # Must NOT reuse km_gamer_token here — that name is also used for the
+                    # Must NOT reuse bmc_gamer_token here — that name is also used for the
                     # mobile app's role="user" sessions, and /auth/me/'s cookie-based
                     # lookup-order heuristic uses the cookie's presence/name to decide
                     # which collection to check first. Sharing the name meant a website
                     # session could get misidentified as a mobile session and resolve
                     # against the wrong (db.users) account if one happens to exist under
                     # the same email — silently losing that account's saved phone number.
-                    cookie_key = "km_website_token"
+                    cookie_key = "bmc_website_token"
                 else:
-                    cookie_key = "km_gamer_token"
+                    cookie_key = "bmc_gamer_token"
 
                 if token and cookie_key:
                     response_obj.set_cookie(
@@ -276,7 +276,7 @@ class KheloMoreVerifyOTPView(APIView):
         return response_obj
 
 
-class KheloMoreGoogleAuthView(APIView):
+class BookMyConsoleGoogleAuthView(APIView):
     """
     POST /auth/google/
     Body: { gmail, gamertag, iv }           — AES-CBC encrypted
@@ -284,7 +284,7 @@ class KheloMoreGoogleAuthView(APIView):
     """
     def post(self, request):
         data = request.data
-        result, status_code = auth_handler.khelomore_google_auth(
+        result, status_code = auth_handler.bookmyconsole_google_auth(
             gmail    = data.get("gmail", ""),
             gamertag = data.get("gamertag", ""),
             iv       = data.get("iv", ""),
@@ -293,7 +293,7 @@ class KheloMoreGoogleAuthView(APIView):
         return Response(result, status=status_code)
 
 
-class KheloMoreResendOTPView(APIView):
+class BookMyConsoleResendOTPView(APIView):
     """
     POST /auth/resend-otp/
     Body: { email, iv, role }
@@ -363,7 +363,7 @@ class KheloMoreResendOTPView(APIView):
         return Response({"encrypted_response": enc_resp, "iv": new_iv}, status=200)
 
 
-class KheloMoreForgotPasswordView(APIView):
+class BookMyConsoleForgotPasswordView(APIView):
     """
     POST /auth/forgot-password/
     Body: { email, iv, role }           — AES-CBC encrypted (except role)
@@ -377,7 +377,7 @@ class KheloMoreForgotPasswordView(APIView):
         data = request.data
         # No role guard here, same reasoning as login: this can only look up an existing
         # account (find_one), never create or promote one.
-        result, status_code = auth_handler.khelomore_forgot_password(
+        result, status_code = auth_handler.bookmyconsole_forgot_password(
             email    = data.get("email", ""),
             iv       = data.get("iv", ""),
             is_admin = check_is_admin(request),
@@ -386,7 +386,7 @@ class KheloMoreForgotPasswordView(APIView):
         return Response(result, status=status_code)
 
 
-class KheloMoreResetPasswordView(APIView):
+class BookMyConsoleResetPasswordView(APIView):
     """
     POST /auth/reset-password/
     Body: { email, otp_code, new_password, iv, role }   — AES-CBC encrypted (except role)
@@ -397,7 +397,7 @@ class KheloMoreResetPasswordView(APIView):
 
     def post(self, request):
         data = request.data
-        result, status_code = auth_handler.khelomore_reset_password(
+        result, status_code = auth_handler.bookmyconsole_reset_password(
             email        = data.get("email", ""),
             otp_code     = data.get("otp_code", ""),
             new_password = data.get("new_password", ""),
@@ -417,7 +417,7 @@ def _is_allowed_oauth_redirect_target(target):
     """
     if not target:
         return False
-    if target.startswith('khelomore://') or target.startswith('exp://'):
+    if target.startswith('bookmyconsole://') or target.startswith('exp://'):
         return True
     try:
         from urllib.parse import urlparse
@@ -432,7 +432,7 @@ def _is_allowed_oauth_redirect_target(target):
     return False
 
 
-class KheloMoreGoogleLoginView(APIView):
+class BookMyConsoleGoogleLoginView(APIView):
     """
     GET /auth/google/login/
     Redirects to Google accounts login page.
@@ -457,7 +457,7 @@ class KheloMoreGoogleLoginView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class KheloMoreGoogleCallbackView(APIView):
+class BookMyConsoleGoogleCallbackView(APIView):
     """
     GET /auth/google/callback/
     Receives auth code from Google, verifies it, and redirects to mobile app schema.
@@ -468,9 +468,9 @@ class KheloMoreGoogleCallbackView(APIView):
             state = request.query_params.get('state', settings.FRONTEND_URL)
             if not code:
                 return Response({"error": "Auth code not provided"}, status=status.HTTP_400_BAD_REQUEST)
-            is_mobile = state.startswith('khelomore://') or state.startswith('exp://')
+            is_mobile = state.startswith('bookmyconsole://') or state.startswith('exp://')
             role = "user" if is_mobile else "website_user"
-            response, status_code = auth_handler.khelomore_google_auth_code_verify(code, role=role)
+            response, status_code = auth_handler.bookmyconsole_google_auth_code_verify(code, role=role)
             
             if status_code == 200:
                 # SECURITY: Only allow redirects to our own app schemes / our own frontend origin —
@@ -485,7 +485,7 @@ class KheloMoreGoogleCallbackView(APIView):
                 encoded_iv = quote(response['iv'])
                 redirect_url = f"{state}{separator}encrypted_response={encoded_response}&iv={encoded_iv}"
                 
-                # CRITICAL: Django's 'redirect' blocks custom protocols like exp:// or khelomore://
+                # CRITICAL: Django's 'redirect' blocks custom protocols like exp:// or bookmyconsole://
                 # We bypass this by using a raw HttpResponse with status 302
                 from django.http import HttpResponse
                 response_obj = HttpResponse(status=302)
@@ -499,12 +499,12 @@ class KheloMoreGoogleCallbackView(APIView):
                         token = parsed.get("token")
                         if token:
                             # role is always "website_user" here (mobile is handled by the
-                            # `if is_mobile` branch above) — km_website_token, not
-                            # km_gamer_token, so /auth/me/'s lookup order can tell this
+                            # `if is_mobile` branch above) — bmc_website_token, not
+                            # bmc_gamer_token, so /auth/me/'s lookup order can tell this
                             # apart from a mobile-app gamer session. See the matching
-                            # comment in KheloMoreVerifyOTPView for the bug this caused.
+                            # comment in BookMyConsoleVerifyOTPView for the bug this caused.
                             response_obj.set_cookie(
-                                key='km_website_token',
+                                key='bmc_website_token',
                                 value=token,
                                 httponly=True,
                                 secure=True,
@@ -512,7 +512,7 @@ class KheloMoreGoogleCallbackView(APIView):
                                 max_age=30 * 24 * 3600,
                             )
                     except Exception as e:
-                        print(f"[COOKIE ERROR] Failed to set Google km_website_token cookie: {e}")
+                        print(f"[COOKIE ERROR] Failed to set Google bmc_website_token cookie: {e}")
 
                 return response_obj
             
@@ -523,7 +523,7 @@ class KheloMoreGoogleCallbackView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class KheloMoreUpdatePhoneView(APIView):
+class BookMyConsoleUpdatePhoneView(APIView):
     """
     POST /auth/update-phone/
     Header: Authorization: Bearer <token>
@@ -536,7 +536,7 @@ class KheloMoreUpdatePhoneView(APIView):
             return error_response
 
         data = request.data
-        result, status_code = auth_handler.khelomore_update_phone(
+        result, status_code = auth_handler.bookmyconsole_update_phone(
             email           = email,
             phone_encrypted = data.get("phone", ""),
             iv              = data.get("iv", ""),
@@ -1441,7 +1441,7 @@ class UserStatusToggleView(APIView):
         return Response(result, status=status_code)
 
 
-class KheloMoreLogoutView(APIView):
+class BookMyConsoleLogoutView(APIView):
     """
     POST /auth/logout/
     Revokes the current JWT server-side and clears whichever auth cookie was set
@@ -1455,7 +1455,7 @@ class KheloMoreLogoutView(APIView):
         if auth_header and auth_header.startswith('Bearer '):
             token = auth_header.split(' ')[1].strip()
         else:
-            for cookie_name in ('km_gamer_token', 'km_website_token', 'km_admin_token', 'km_super_admin_token'):
+            for cookie_name in ('bmc_gamer_token', 'bmc_website_token', 'bmc_admin_token', 'bmc_super_admin_token'):
                 token = request.COOKIES.get(cookie_name)
                 if token:
                     break
@@ -1467,7 +1467,7 @@ class KheloMoreLogoutView(APIView):
                 print(f"[LOGOUT] Token revocation failed: {e}")
 
         response_obj = Response({"message": "Logout successful"}, status=status.HTTP_200_OK)
-        for cookie_name in ('km_gamer_token', 'km_website_token', 'km_admin_token', 'km_super_admin_token'):
+        for cookie_name in ('bmc_gamer_token', 'bmc_website_token', 'bmc_admin_token', 'bmc_super_admin_token'):
             response_obj.set_cookie(
                 key=cookie_name,
                 value='',
@@ -1479,7 +1479,7 @@ class KheloMoreLogoutView(APIView):
         return response_obj
 
 
-class KheloMoreMeView(APIView):
+class BookMyConsoleMeView(APIView):
     """
     GET /auth/me/
     Returns the currently authenticated user's profile info based on the HttpOnly cookie/auth header.
@@ -1497,11 +1497,11 @@ class KheloMoreMeView(APIView):
         # account the frontend making the request means; only fall back to guessing a
         # fixed order when authenticating via a bare Authorization header, which carries
         # no such hint.
-        if request.COOKIES.get('km_admin_token'):
+        if request.COOKIES.get('bmc_admin_token'):
             lookup_order = [(db_main.admins, "admin"), (db_main.website_users, "website_user"), (db_main.users, "user")]
-        elif request.COOKIES.get('km_website_token'):
+        elif request.COOKIES.get('bmc_website_token'):
             lookup_order = [(db_main.website_users, "website_user"), (db_main.users, "user"), (db_main.admins, "admin")]
-        elif request.COOKIES.get('km_gamer_token'):
+        elif request.COOKIES.get('bmc_gamer_token'):
             lookup_order = [(db_main.users, "user"), (db_main.website_users, "website_user"), (db_main.admins, "admin")]
         else:
             lookup_order = [(db_main.website_users, "website_user"), (db_main.users, "user"), (db_main.admins, "admin")]

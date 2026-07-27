@@ -66,20 +66,20 @@ class CafeOwnerEmailExposureTests(SecurityTestCase):
     """
 
     def test_public_cafe_list_does_not_expose_owner_email(self):
-        cafe_id = self.make_cafe(owner_email="real-owner@khelomore.invalid")
+        cafe_id = self.make_cafe(owner_email="real-owner@bookmyconsole.invalid")
         resp = self.client.get("/api/v1/main/cafes/")
         self.assertEqual(resp.status_code, 200)
         cafe = next(c for c in resp.json()["cafes"] if c["id"] == cafe_id)
         self.assertEqual(cafe["owner_email"], "")
 
     def test_public_cafe_detail_does_not_expose_owner_email(self):
-        cafe_id = self.make_cafe(owner_email="real-owner2@khelomore.invalid")
+        cafe_id = self.make_cafe(owner_email="real-owner2@bookmyconsole.invalid")
         resp = self.client.get(f"/api/v1/main/cafes/{cafe_id}/")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["cafe"]["owner_email"], "")
 
     def test_contact_email_does_not_silently_fall_back_to_owner_email_publicly(self):
-        cafe_id = self.make_cafe(owner_email="real-owner3@khelomore.invalid")
+        cafe_id = self.make_cafe(owner_email="real-owner3@bookmyconsole.invalid")
         resp = self.client.get(f"/api/v1/main/cafes/{cafe_id}/")
         self.assertEqual(resp.json()["cafe"]["contact_email"], "")
 
@@ -110,14 +110,14 @@ class CafeOwnerEmailExposureTests(SecurityTestCase):
     def test_super_admin_still_sees_owner_email_via_include_deleted(self):
         doc = {
             "name": "Sectest Owner-Visible Deleted Cafe", "area": "Test Area",
-            "price_per_hour": 100, "owner_email": "deleted-owner2@khelomore.invalid",
+            "price_per_hour": 100, "owner_email": "deleted-owner2@bookmyconsole.invalid",
             "is_deleted": True,
         }
         result = self.db.cafes.insert_one(doc)
         cafe_id = str(self.track("cafes", result.inserted_id))
         resp = self.client.get("/api/v1/main/cafes/?include_deleted=true", **self.admin_header())
         cafe = next(c for c in resp.json()["cafes"] if c["id"] == cafe_id)
-        self.assertEqual(cafe["owner_email"], "deleted-owner2@khelomore.invalid")
+        self.assertEqual(cafe["owner_email"], "deleted-owner2@bookmyconsole.invalid")
 
 
 class CafeIncludeDeletedTests(SecurityTestCase):
@@ -140,7 +140,7 @@ class CafeIncludeDeletedTests(SecurityTestCase):
             "name": "Sectest Deleted Cafe",
             "area": "Test Area",
             "price_per_hour": 100,
-            "owner_email": "deleted-owner@khelomore.invalid",
+            "owner_email": "deleted-owner@bookmyconsole.invalid",
             "is_deleted": True,
         }
         result = self.db.cafes.insert_one(doc)
@@ -177,11 +177,11 @@ class OAuthRedirectTests(SecurityTestCase):
 
     def test_helper_rejects_lookalike_domain(self):
         from ..views import _is_allowed_oauth_redirect_target
-        self.assertFalse(_is_allowed_oauth_redirect_target("https://khelomore.com.evil.example.com/"))
+        self.assertFalse(_is_allowed_oauth_redirect_target("https://bookmyconsole.com.evil.example.com/"))
 
     def test_helper_allows_app_schemes(self):
         from ..views import _is_allowed_oauth_redirect_target
-        self.assertTrue(_is_allowed_oauth_redirect_target("khelomore://callback"))
+        self.assertTrue(_is_allowed_oauth_redirect_target("bookmyconsole://callback"))
         self.assertTrue(_is_allowed_oauth_redirect_target("exp://192.168.1.1:19000"))
 
     def test_helper_rejects_empty_target(self):
@@ -194,7 +194,7 @@ class OAuthRedirectTests(SecurityTestCase):
         self.assertEqual(resp.status_code, 400)
 
     def test_google_login_allows_app_scheme_return_url(self):
-        resp = self.client.get("/api/v1/main/auth/google/login/?return_url=khelomore://callback")
+        resp = self.client.get("/api/v1/main/auth/google/login/?return_url=bookmyconsole://callback")
         self.assertEqual(resp.status_code, 302)
 
 
@@ -404,14 +404,14 @@ class WebsiteUserMeCookieRoutingTests(SecurityTestCase):
     """
     /auth/me/'s cookie-based lookup-order heuristic must resolve a website_user session to
     db.website_users first, not db.users. Regression guard for a real bug: the public
-    website's Google-login flow set its session cookie under the name "km_gamer_token" —
+    website's Google-login flow set its session cookie under the name "bmc_gamer_token" —
     the SAME name used for the mobile app's role="user" sessions — so /auth/me/ treated
     every website session as if it were a mobile one and checked db.users first. Anyone
     whose email happened to also exist in db.users (e.g. from also using the mobile app)
     got that OTHER account's data back — in the reported case, an empty phone number —
     which silently overwrote the correct session and made the "Complete your onboarding"
     phone prompt reappear on every page load despite a phone already being saved. Fixed by
-    giving website_user sessions their own cookie name, "km_website_token".
+    giving website_user sessions their own cookie name, "bmc_website_token".
     """
 
     def _make_duplicate_accounts(self):
@@ -438,7 +438,7 @@ class WebsiteUserMeCookieRoutingTests(SecurityTestCase):
         token = auth_handler.generate_token(email, role="website_user")
 
         client = self.client
-        client.cookies["km_website_token"] = token
+        client.cookies["bmc_website_token"] = token
         resp = client.get("/api/v1/main/auth/me/")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["user"]["phone"], "9812345678")

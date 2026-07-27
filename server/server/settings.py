@@ -1,5 +1,8 @@
+
+
+
 """
-Django settings for KheloMore Gaming Hub backend.
+Django settings for BookMyConsole Gaming Hub backend.
 """
 # Trigger reload
 
@@ -91,11 +94,11 @@ MIDDLEWARE = [
 ]
 
 # CORS
-# SECURITY: auth is cookie-based (km_gamer_token / km_admin_token / km_super_admin_token,
+# SECURITY: auth is cookie-based (bmc_gamer_token / bmc_admin_token / bmc_super_admin_token,
 # all SameSite=None so they're sent cross-site) with CORS_ALLOW_CREDENTIALS=True. Combined
 # with a wildcard origin, ANY website could read authenticated API responses on behalf of a
 # logged-in user/admin/super-admin via a simple cross-origin fetch(). Set CORS_ALLOWED_ORIGINS
-# (comma-separated, e.g. https://app.khelomore.com,https://admin.khelomore.com) once real
+# (comma-separated, e.g. https://app.bookmyconsole.com,https://admin.bookmyconsole.com) once real
 # frontend domains are known — falls back to wildcard only while DEBUG=True.
 _cors_origins_env = os.getenv('CORS_ALLOWED_ORIGINS', '')
 CORS_ALLOWED_ORIGINS = []

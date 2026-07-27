@@ -1,4 +1,4 @@
-"""KheloMore Gaming Hub — Root URL Configuration"""
+"""BookMyConsole Gaming Hub — Root URL Configuration"""
 from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
@@ -6,7 +6,7 @@ from django.http import JsonResponse
 
 def home_view(request):
     return JsonResponse({
-        "message": "KheloMore Gaming Hub API is running.",
+        "message": "BookMyConsole Gaming Hub API is running.",
         "version": "v1",
         "docs": "Use /api/v1/main/ endpoints"
     })

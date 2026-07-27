@@ -1,5 +1,5 @@
 # db_connection.py
-# MongoDB connection for KheloMore Gaming Hub
+# MongoDB connection for BookMyConsole Gaming Hub
 # ─────────────────────────────────────────────
 
 import os
@@ -22,15 +22,15 @@ def get_db():
         if not MONGO_URL:
             # Fail loud: pymongo.MongoClient(None) silently falls back to localhost, which
             # would connect to (or spin up expectations of) the wrong database undetected.
-            print("[KheloMore] MONGO_URL environment variable is not set.")
+            print("[BookMyConsole] MONGO_URL environment variable is not set.")
             return None
         try:
             _client = pymongo.MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
             # Ping database to force connection check
             _client.admin.command('ping')
-            print(f"[KheloMore] MongoDB connected successfully - database: '{MONGO_DB_NAME}'")
+            print(f"[BookMyConsole] MongoDB connected successfully - database: '{MONGO_DB_NAME}'")
         except Exception as e:
-            print(f"[KheloMore] Failed to connect to MongoDB: {e}")
+            print(f"[BookMyConsole] Failed to connect to MongoDB: {e}")
             _client = None
             return None
     return _client[MONGO_DB_NAME]
@@ -46,7 +46,7 @@ class _DbProxy:
     def __getattr__(self, name: str):
         db = get_db()
         if db is None:
-            raise ConnectionError("[KheloMore] MongoDB not available")
+            raise ConnectionError("[BookMyConsole] MongoDB not available")
         return getattr(db, name)
 
 

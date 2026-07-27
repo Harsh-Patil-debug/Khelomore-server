@@ -1,5 +1,5 @@
 """
-KheloMore Gaming Hub — URL Routes
+BookMyConsole Gaming Hub — URL Routes
 All API routes mounted under: /api/v1/main/
 """
 from django.urls import path
@@ -66,20 +66,20 @@ urlpatterns = [
 
 
     # ── Auth (traditional — OTP mandatory) ────────────────────────────────────
-    path('auth/register/',   KheloMoreRegisterView.as_view(),  name='auth_register'),
-    path('auth/login/',      KheloMoreLoginView.as_view(),     name='auth_login'),
-    path('auth/verify-otp/', KheloMoreVerifyOTPView.as_view(), name='auth_verify_otp'),
-    path('auth/resend-otp/', KheloMoreResendOTPView.as_view(), name='auth_resend_otp'),
-    path('auth/forgot-password/', KheloMoreForgotPasswordView.as_view(), name='auth_forgot_password'),
-    path('auth/reset-password/', KheloMoreResetPasswordView.as_view(), name='auth_reset_password'),
-    path('auth/update-phone/', KheloMoreUpdatePhoneView.as_view(), name='auth_update_phone'),
-    path('auth/logout/',     KheloMoreLogoutView.as_view(),    name='auth_logout'),
-    path('auth/me/',         KheloMoreMeView.as_view(),        name='auth_me'),
+    path('auth/register/',   BookMyConsoleRegisterView.as_view(),  name='auth_register'),
+    path('auth/login/',      BookMyConsoleLoginView.as_view(),     name='auth_login'),
+    path('auth/verify-otp/', BookMyConsoleVerifyOTPView.as_view(), name='auth_verify_otp'),
+    path('auth/resend-otp/', BookMyConsoleResendOTPView.as_view(), name='auth_resend_otp'),
+    path('auth/forgot-password/', BookMyConsoleForgotPasswordView.as_view(), name='auth_forgot_password'),
+    path('auth/reset-password/', BookMyConsoleResetPasswordView.as_view(), name='auth_reset_password'),
+    path('auth/update-phone/', BookMyConsoleUpdatePhoneView.as_view(), name='auth_update_phone'),
+    path('auth/logout/',     BookMyConsoleLogoutView.as_view(),    name='auth_logout'),
+    path('auth/me/',         BookMyConsoleMeView.as_view(),        name='auth_me'),
 
     # ── Auth (Google — JWT direct, no OTP) ────────────────────────────────────
-    path('auth/google/',     KheloMoreGoogleAuthView.as_view(), name='auth_google'),
-    path('auth/google/login/', KheloMoreGoogleLoginView.as_view(), name='auth_google_login'),
-    path('auth/google/callback/', KheloMoreGoogleCallbackView.as_view(), name='auth_google_callback'),
+    path('auth/google/',     BookMyConsoleGoogleAuthView.as_view(), name='auth_google'),
+    path('auth/google/login/', BookMyConsoleGoogleLoginView.as_view(), name='auth_google_login'),
+    path('auth/google/callback/', BookMyConsoleGoogleCallbackView.as_view(), name='auth_google_callback'),
 
     # ── Bookings ──────────────────────────────────────────────────────────────
     path('bookings/slots/',  BookedSlotsView.as_view(),        name='bookings_slots'),

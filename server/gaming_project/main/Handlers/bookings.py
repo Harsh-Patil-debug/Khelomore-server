@@ -1,5 +1,5 @@
 # bookings.py
-# Handlers for managing PC/Console station bookings in KheloMore Gaming Hub
+# Handlers for managing PC/Console station bookings in BookMyConsole Gaming Hub
 
 import os
 from datetime import datetime, timezone
@@ -21,7 +21,7 @@ SEED_BOOKINGS = [
         "rig": "PC #01 · RTX 4090 · 360Hz",
         "remaining_time_seconds": 4500,
         "user_name": "SHADOW_WRATH",
-        "user_email": "shadow@khelomore.com"
+        "user_email": "shadow@bookmyconsole.com"
     },
     {
         "cafe_id": "red-zone-nerul",
@@ -34,7 +34,7 @@ SEED_BOOKINGS = [
         "status": "Upcoming",
         "rig": "PC #12 · RTX 4070 · 240Hz",
         "user_name": "SHADOW_WRATH",
-        "user_email": "shadow@khelomore.com"
+        "user_email": "shadow@bookmyconsole.com"
     },
     {
         "cafe_id": "vortex-nerul",
@@ -47,7 +47,7 @@ SEED_BOOKINGS = [
         "status": "Completed",
         "rig": "PS5 Pro #03 · DualSense Edge · 4K",
         "user_name": "SHADOW_WRATH",
-        "user_email": "shadow@khelomore.com"
+        "user_email": "shadow@bookmyconsole.com"
     }
 ]
 
@@ -104,7 +104,7 @@ def get_bookings_handler(cafe_id=None):
             seeded[1]["date"] = tomorrow_str
             
             db_main.bookings.insert_many(seeded)
-            print(f"[KheloMore] Seeded {len(seeded)} initial game bookings in MongoDB.")
+            print(f"[BookMyConsole] Seeded {len(seeded)} initial game bookings in MongoDB.")
 
         # Build query — optionally filter by cafe_id
         query = {}
@@ -171,7 +171,7 @@ def create_booking_handler(data):
         result = db_main.bookings.insert_one(booking_doc)
         booking_doc["_id"] = result.inserted_id
 
-        print(f"[KheloMore] Created booking: {booking_doc['code']} for user: {user_name} at cafe: {booking_doc['cafe_name']}")
+        print(f"[BookMyConsole] Created booking: {booking_doc['code']} for user: {user_name} at cafe: {booking_doc['cafe_name']}")
         return {"status": "success", "booking": map_booking_doc(booking_doc)}
     except Exception as e:
         return {"status": "error", "message": f"Failed to create booking: {e}"}

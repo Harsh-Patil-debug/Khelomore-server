@@ -21,7 +21,7 @@ def db_check():
     try:
         # 1. Insert
         doc = {
-            "ping": "khelomore",
+            "ping": "bookmyconsole",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         insert_result = test_collection.insert_one(doc)

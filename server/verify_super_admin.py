@@ -6,7 +6,7 @@ import pymongo
 from pymongo import MongoClient
 
 # Setup django
-sys.path.append(r"C:\Users\DELL\OneDrive\Desktop\khelomore-server\server")
+sys.path.append(r"C:\Users\DELL\OneDrive\Desktop\bookmyconsole-server\server")
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "server.settings")
 django.setup()
 
@@ -23,7 +23,7 @@ def verify():
     print("======================================================================")
     
     db = get_db()
-    test_email = "verify_superadmin@khelomore.com"
+    test_email = "verify_superadmin@bookmyconsole.com"
     db.super_admin.delete_many({"email": test_email})
     
     import base64
@@ -50,7 +50,7 @@ def verify():
     print(f"  - Encrypted Password (base64): {password_enc}")
 
     print("\n[STEP 2] Sending registration request to backend...")
-    result, status = auth_handler.khelomore_register(
+    result, status = auth_handler.bookmyconsole_register(
         gamertag=gamertag_enc,
         email=email_enc,
         password=password_enc,
@@ -91,7 +91,7 @@ def verify():
     email_enc_login = encrypt_login(test_email)
     password_enc_login = encrypt_login("supersecurepassword123")
 
-    login_result, login_status = auth_handler.khelomore_login(
+    login_result, login_status = auth_handler.bookmyconsole_login(
         email=email_enc_login,
         password=password_enc_login,
         iv=login_iv_b64,
@@ -118,7 +118,7 @@ def verify():
     email_enc_verify = encrypt_verify(test_email)
     otp_enc_verify = encrypt_verify(otp_code)
 
-    verify_result, verify_status = auth_handler.khelomore_verify_otp(
+    verify_result, verify_status = auth_handler.bookmyconsole_verify_otp(
         email=email_enc_verify,
         otp_code=otp_enc_verify,
         iv=verify_iv_b64,

@@ -21,7 +21,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 
-sys.path.append(r"C:\Users\DELL\OneDrive\Desktop\khelomore-server\server")
+sys.path.append(r"C:\Users\DELL\OneDrive\Desktop\bookmyconsole-server\server")
 os.environ["MONGO_DB_NAME"] = os.getenv("MONGO_DB_NAME_TEST", "KheloMoreDB_test")
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "server.settings")
 
@@ -46,7 +46,7 @@ def main():
     db = get_db()
     assert db is not None, "MongoDB test database is not reachable."
 
-    email = "cookie-auth-verify@khelomore.invalid"
+    email = "cookie-auth-verify@bookmyconsole.invalid"
     db.super_admin.delete_many({"email": email})
 
     print("=" * 70)
@@ -75,7 +75,7 @@ def main():
 
     cookie_names = list(resp.cookies.keys())
     print(f"  - Cookies received: {cookie_names}")
-    assert "km_super_admin_token" in cookie_names, "km_super_admin_token cookie was not set!"
+    assert "bmc_super_admin_token" in cookie_names, "bmc_super_admin_token cookie was not set!"
 
     print("\n[STEP 2] GET /users/ (super-admin-gated) using ONLY the client's cookies —"
           " deliberately with NO Authorization header, exactly what the fixed frontend"
@@ -100,7 +100,7 @@ def main():
     db.super_admin.delete_many({"email": email})
 
     print("\n" + "=" * 70)
-    print("  CONFIRMED: the HttpOnly km_super_admin_token cookie, set once during OTP")
+    print("  CONFIRMED: the HttpOnly bmc_super_admin_token cookie, set once during OTP")
     print("  verification, is sufficient on its own for super-admin-gated requests.")
     print("  Removing the static VITE_ADMIN_TOKEN fallback from the frontend is SAFE —")
     print("  a real logged-in super admin will keep working via the cookie alone, over")

@@ -228,7 +228,7 @@ def generate_qr_code(uri: str) -> str:
 
 
 # ===============================================================================
-# KheloMore Custom Auth Functions (email OTP mandatory for traditional auth)
+# BookMyConsole Custom Auth Functions (email OTP mandatory for traditional auth)
 # ===============================================================================
 
 def get_user_collection(is_admin=False, role=""):
@@ -240,7 +240,7 @@ def get_user_collection(is_admin=False, role=""):
         return db_main.admins
     return db_main.admins if is_admin else db_main.users
 
-def khelomore_register(gamertag, email, password, iv, phone=None, is_admin=False, role="", razorpay_password=None):
+def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=False, role="", razorpay_password=None):
     """Signup Step 1 - creates pending user, sends OTP, NO JWT yet."""
     try:
         dec_gamertag = decrypt_data(gamertag, iv).strip()
@@ -315,7 +315,7 @@ def khelomore_register(gamertag, email, password, iv, phone=None, is_admin=False
     return {"encrypted_response": enc_resp, "iv": iv2}, 200
 
 
-def khelomore_login(email, password, iv, is_admin=False, role=""):
+def bookmyconsole_login(email, password, iv, is_admin=False, role=""):
     """Login Step 1 - verifies credentials, sends OTP, NO JWT yet."""
     try:
         dec_email    = decrypt_data(email, iv).strip().lower()
@@ -376,7 +376,7 @@ def khelomore_login(email, password, iv, is_admin=False, role=""):
     return {"encrypted_response": enc_resp, "iv": iv2}, 200
 
 
-def khelomore_verify_otp(email, otp_code, iv, is_admin=False, role=""):
+def bookmyconsole_verify_otp(email, otp_code, iv, is_admin=False, role=""):
     """Step 2 (login + signup) - validates OTP, activates account, issues JWT."""
     try:
         dec_email = decrypt_data(email, iv).strip().lower()
@@ -462,14 +462,14 @@ def khelomore_verify_otp(email, otp_code, iv, is_admin=False, role=""):
 MAX_PASSWORD_RESET_ATTEMPTS = MAX_OTP_ATTEMPTS
 
 
-def khelomore_forgot_password(email, iv, is_admin=False, role=""):
+def bookmyconsole_forgot_password(email, iv, is_admin=False, role=""):
     """
     Step 1 of password reset: if an account exists for this email, email it a reset OTP.
 
     SECURITY: always returns the same generic message regardless of whether the account
     exists, is Google-only (no password to reset), or is blocked — revealing any of that
     here would let an attacker enumerate registered emails or account types. Only the
-    actual reset step (khelomore_reset_password) needs the OTP to have been genuinely
+    actual reset step (bookmyconsole_reset_password) needs the OTP to have been genuinely
     sent, which it silently isn't for any of those cases.
     """
     try:
@@ -519,7 +519,7 @@ def khelomore_forgot_password(email, iv, is_admin=False, role=""):
     return _respond()
 
 
-def khelomore_reset_password(email, otp_code, new_password, iv, is_admin=False, role=""):
+def bookmyconsole_reset_password(email, otp_code, new_password, iv, is_admin=False, role=""):
     """Step 2 of password reset: verify the reset OTP and set a new password."""
     try:
         dec_email = decrypt_data(email, iv).strip().lower()
@@ -584,7 +584,7 @@ def khelomore_reset_password(email, otp_code, new_password, iv, is_admin=False, 
     return {"encrypted_response": enc_resp, "iv": iv2}, 200
 
 
-def khelomore_google_auth(gmail, gamertag, iv, is_admin=False, role=""):
+def bookmyconsole_google_auth(gmail, gamertag, iv, is_admin=False, role=""):
     """Google Sign-In: find or create user, return JWT DIRECTLY (no OTP needed)."""
     try:
         dec_email    = decrypt_data(gmail, iv).strip().lower()
@@ -648,9 +648,9 @@ def khelomore_google_auth(gmail, gamertag, iv, is_admin=False, role=""):
     return {"encrypted_response": enc_resp, "iv": iv2}, 200
 
 
-def khelomore_google_auth_code_verify(code: str, is_admin=False, role=""):
+def bookmyconsole_google_auth_code_verify(code: str, is_admin=False, role=""):
     """
-    Exchanges Google Auth Code for ID Token, verifies it, and returns a Khelomore session.
+    Exchanges Google Auth Code for ID Token, verifies it, and returns a BookMyConsole session.
     """
     try:
         token_url = "https://oauth2.googleapis.com/token"
@@ -760,7 +760,7 @@ def khelomore_google_auth_code_verify(code: str, is_admin=False, role=""):
         return {"error": f"Google login failed: {str(e)}"}, 500
 
 
-def khelomore_update_phone(email, phone_encrypted, iv, is_admin=False, role=""):
+def bookmyconsole_update_phone(email, phone_encrypted, iv, is_admin=False, role=""):
     """Updates a user's phone number securely."""
     try:
         dec_phone = decrypt_data(phone_encrypted, iv).strip()

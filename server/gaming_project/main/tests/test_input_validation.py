@@ -67,7 +67,7 @@ class RegisterValidationTests(SecurityTestCase):
         iv = encrypted[-1]
         enc_gamertag, enc_email, enc_password = encrypted[0], encrypted[1], encrypted[2]
         enc_phone = encrypted[3] if phone else None
-        return auth_handler.khelomore_register(enc_gamertag, enc_email, enc_password, iv, phone=enc_phone, role="user")
+        return auth_handler.bookmyconsole_register(enc_gamertag, enc_email, enc_password, iv, phone=enc_phone, role="user")
 
     def test_weak_password_rejected_even_though_client_would_have_allowed_it_pre_fix(self):
         result, code = self._register(password="short1")

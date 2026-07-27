@@ -13,7 +13,7 @@ class BookingDetailOwnershipTests(SecurityTestCase):
     def test_unrelated_user_cannot_update_someone_elses_booking(self):
         owner_email, _ = self.make_active_user()
         attacker_email, attacker_token = self.make_active_user()
-        cafe_id = self.make_cafe(owner_email="cafe-owner-b@khelomore.invalid")
+        cafe_id = self.make_cafe(owner_email="cafe-owner-b@bookmyconsole.invalid")
         booking_id = self.make_booking(owner_email, cafe_id, payment_status="pending")
 
         resp = self.client.put(
@@ -31,7 +31,7 @@ class BookingDetailOwnershipTests(SecurityTestCase):
         admin may change payment_status, otherwise a user could grant themselves a free
         paid booking by PUTting their own record."""
         owner_email, owner_token = self.make_active_user()
-        cafe_id = self.make_cafe(owner_email="cafe-owner-d@khelomore.invalid")
+        cafe_id = self.make_cafe(owner_email="cafe-owner-d@bookmyconsole.invalid")
         booking_id = self.make_booking(owner_email, cafe_id, payment_status="pending")
 
         # Mix payment_status in with a field an owner IS allowed to touch, to prove
@@ -108,8 +108,8 @@ class BookingNoSqlInjectionTests(SecurityTestCase):
 
     def test_dollar_ne_cafe_id_does_not_leak_conflicts_from_an_unrelated_cafe(self):
         # Cafe A has a real, existing booking for PC #01 at a specific slot.
-        cafe_a = self.make_cafe(owner_email="cafe-owner-injA@khelomore.invalid", price_per_hour=100)
-        self.make_booking(user_email="other-user@khelomore.invalid", cafe_id=cafe_a)
+        cafe_a = self.make_cafe(owner_email="cafe-owner-injA@bookmyconsole.invalid", price_per_hour=100)
+        self.make_booking(user_email="other-user@bookmyconsole.invalid", cafe_id=cafe_a)
 
         # The attacker's own cafe (unrelated to cafe A) has no bookings at all.
         customer_email, customer_token = self.make_active_user()
@@ -141,7 +141,7 @@ class BookingPaymentIntegrityTests(SecurityTestCase):
 
     def test_paid_slot_booking_rejected_without_payment_verification(self):
         customer_email, customer_token = self.make_active_user()
-        cafe_id = self.make_cafe(owner_email="cafe-owner-e@khelomore.invalid", price_per_hour=200)
+        cafe_id = self.make_cafe(owner_email="cafe-owner-e@bookmyconsole.invalid", price_per_hour=200)
 
         resp = self.client.post(
             "/api/v1/main/bookings/",
@@ -163,7 +163,7 @@ class BookingPaymentIntegrityTests(SecurityTestCase):
 
     def test_free_slot_booking_succeeds_without_payment(self):
         customer_email, customer_token = self.make_active_user()
-        cafe_id = self.make_cafe(owner_email="cafe-owner-f@khelomore.invalid", price_per_hour=0)
+        cafe_id = self.make_cafe(owner_email="cafe-owner-f@bookmyconsole.invalid", price_per_hour=0)
 
         resp = self.client.post(
             "/api/v1/main/bookings/",
@@ -184,7 +184,7 @@ class BookingPaymentIntegrityTests(SecurityTestCase):
 
     def test_price_is_computed_server_side_from_cafe_rate_not_client_input(self):
         customer_email, customer_token = self.make_active_user()
-        cafe_id = self.make_cafe(owner_email="cafe-owner-g@khelomore.invalid", price_per_hour=0)
+        cafe_id = self.make_cafe(owner_email="cafe-owner-g@bookmyconsole.invalid", price_per_hour=0)
 
         resp = self.client.post(
             "/api/v1/main/bookings/",

@@ -16,9 +16,9 @@ def authenticate_request(request):
     else:
         # Fallback to HttpOnly cookie for web users / admins
         token = (
-            request.COOKIES.get('km_admin_token')
-            or request.COOKIES.get('km_website_token')
-            or request.COOKIES.get('km_gamer_token')
+            request.COOKIES.get('bmc_admin_token')
+            or request.COOKIES.get('bmc_website_token')
+            or request.COOKIES.get('bmc_gamer_token')
         )
 
     print(f"[DEBUG auth_middleware] Incoming Token (Header/Cookie): {token is not None}")
@@ -73,7 +73,7 @@ def authenticate_super_admin_request(request):
             token = parts[1].strip()
     else:
         # Fallback to HttpOnly cookie for super admins
-        token = request.COOKIES.get('km_super_admin_token')
+        token = request.COOKIES.get('bmc_super_admin_token')
 
     print(f"[DEBUG auth_middleware] Incoming Super Admin Token: {token is not None}")
     if not token:

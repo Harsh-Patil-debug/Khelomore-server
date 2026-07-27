@@ -1,5 +1,5 @@
 """
-ASGI config for KheloMore Gaming Hub.
+ASGI config for BookMyConsole Gaming Hub.
 """
 
 import os

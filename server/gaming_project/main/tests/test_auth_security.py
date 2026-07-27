@@ -89,7 +89,7 @@ class SuperAdminRoleEscalationTests(SecurityTestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertIn("km_super_admin_token", resp.cookies)
+        self.assertIn("bmc_super_admin_token", resp.cookies)
 
     def test_register_without_super_admin_role_is_not_blocked_by_the_guard(self):
         """Sanity check: the guard is scoped to role=="super_admin" and must not block
@@ -133,7 +133,7 @@ class OtpLockoutTests(SecurityTestCase):
 
     def _verify(self, email, otp):
         email_enc, otp_enc, iv = self.encrypt_with_shared_iv(email, otp)
-        return auth_handler.khelomore_verify_otp(email_enc, otp_enc, iv, role="user")
+        return auth_handler.bookmyconsole_verify_otp(email_enc, otp_enc, iv, role="user")
 
     def test_wrong_otp_is_rejected(self):
         email = self._seed_pending_otp_user(otp_code="111111")
@@ -173,7 +173,7 @@ class OtpLockoutTests(SecurityTestCase):
             self._verify(email, "000000")
 
         # Simulate a resend: a fresh OTP + expiry, attempts counter cleared (mirrors what
-        # khelomore_login's update_one / the resend-otp view do).
+        # bookmyconsole_login's update_one / the resend-otp view do).
         self.db.users.update_one(
             {"email": email},
             {"$set": {"otp_code": "555555"}, "$unset": {"otp_attempts": ""}},
@@ -187,7 +187,7 @@ class LoginBruteForceTests(SecurityTestCase):
 
     def _login(self, email, password):
         email_enc, password_enc, iv = self.encrypt_with_shared_iv(email, password)
-        return auth_handler.khelomore_login(email_enc, password_enc, iv, role="user")
+        return auth_handler.bookmyconsole_login(email_enc, password_enc, iv, role="user")
 
     def test_wrong_password_is_rejected(self):
         email = self.unique_email("brute")
@@ -240,7 +240,7 @@ class OtpResendCooldownTests(SecurityTestCase):
         self.make_active_user(email=email, password="CorrectHorseBattery1")
         # First login triggers the initial OTP send (sets otp_expiry).
         email_enc, password_enc, iv = self.encrypt_with_shared_iv(email, "CorrectHorseBattery1")
-        auth_handler.khelomore_login(email_enc, password_enc, iv, role="user")
+        auth_handler.bookmyconsole_login(email_enc, password_enc, iv, role="user")
 
         import base64
         from Crypto.Cipher import AES
@@ -346,7 +346,7 @@ class SuperAdminOtpExpiryTests(SecurityTestCase):
         self.make_active_user(email=email, role="super_admin", collection="super_admin", password="CorrectHorseBattery1")
 
         email_enc, password_enc, iv = self.encrypt_with_shared_iv(email, "CorrectHorseBattery1")
-        result, code = auth_handler.khelomore_login(email_enc, password_enc, iv, role="super_admin")
+        result, code = auth_handler.bookmyconsole_login(email_enc, password_enc, iv, role="super_admin")
         self.assertEqual(code, 200)
 
         user = self.db.super_admin.find_one({"email": email})
@@ -364,7 +364,7 @@ class SuperAdminOtpExpiryTests(SecurityTestCase):
         self.make_active_user(email=email, password="CorrectHorseBattery1")
 
         email_enc, password_enc, iv = self.encrypt_with_shared_iv(email, "CorrectHorseBattery1")
-        auth_handler.khelomore_login(email_enc, password_enc, iv, role="user")
+        auth_handler.bookmyconsole_login(email_enc, password_enc, iv, role="user")
 
         user = self.db.users.find_one({"email": email})
         expiry = user["otp_expiry"]

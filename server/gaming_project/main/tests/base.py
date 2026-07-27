@@ -53,12 +53,12 @@ class SecurityTestCase(TestCase):
         return doc_id
 
     def unique_email(self, tag="user"):
-        return f"sectest.{tag}.{uuid.uuid4().hex[:10]}@khelomore.invalid"
+        return f"sectest.{tag}.{uuid.uuid4().hex[:10]}@bookmyconsole.invalid"
 
     def encrypt_with_shared_iv(self, *plaintexts):
         """
         Encrypts multiple values under one shared IV, matching the real client contract for
-        multi-field encrypted bodies (e.g. khelomore_verify_otp decrypts both `email` and
+        multi-field encrypted bodies (e.g. bookmyconsole_verify_otp decrypts both `email` and
         `otp_code` using a single `iv` field).
         """
         iv_bytes = get_random_bytes(16)

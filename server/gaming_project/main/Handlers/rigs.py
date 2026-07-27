@@ -1,5 +1,5 @@
 # rigs.py
-# Handlers for managing PC/Console hardware rigs in KheloMore Gaming Hub
+# Handlers for managing PC/Console hardware rigs in BookMyConsole Gaming Hub
 
 from bson import ObjectId
 from .db_connection import get_db
@@ -93,7 +93,7 @@ def get_rigs_handler(cafe_id=None):
                 })
             if rigs_to_insert:
                 db_main.rigs.insert_many(rigs_to_insert)
-                print(f"[KheloMore] Auto-seeded {len(rigs_to_insert)} rigs for cafe: {cafe_id}")
+                print(f"[BookMyConsole] Auto-seeded {len(rigs_to_insert)} rigs for cafe: {cafe_id}")
         
         # General fallback: if collection is completely empty, seed for all cafes
         elif db_main.rigs.count_documents({}) == 0:
@@ -131,7 +131,7 @@ def get_rigs_handler(cafe_id=None):
                 if rigs_to_insert:
                     db_main.rigs.insert_many(rigs_to_insert)
                     seeded_count = len(rigs_to_insert)
-            print(f"[KheloMore] Auto-seeded {seeded_count} global hardware rigs in MongoDB.")
+            print(f"[BookMyConsole] Auto-seeded {seeded_count} global hardware rigs in MongoDB.")
 
         # Build query
         query = {}
@@ -269,7 +269,7 @@ def create_rig_handler(data):
         result = db_main.rigs.insert_one(rig_doc)
         rig_doc["_id"] = result.inserted_id
 
-        print(f"[KheloMore] Created rig: {rig_doc['name']} for cafe: {rig_doc['cafe_id']}")
+        print(f"[BookMyConsole] Created rig: {rig_doc['name']} for cafe: {rig_doc['cafe_id']}")
         return {"status": "success", "rig": map_rig_doc(rig_doc)}
     except Exception as e:
         return {"status": "error", "message": f"Failed to create rig: {e}"}
@@ -361,7 +361,7 @@ def update_rig_handler(rig_id, data):
             return {"status": "error", "message": "Rig not found."}
 
         updated_doc = db_main.rigs.find_one({"_id": ObjectId(rig_id)})
-        print(f"[KheloMore] Updated rig: {rig_id}")
+        print(f"[BookMyConsole] Updated rig: {rig_id}")
         return {"status": "success", "rig": map_rig_doc(updated_doc)}
     except Exception as e:
         return {"status": "error", "message": f"Failed to update rig: {e}"}
@@ -380,7 +380,7 @@ def delete_rig_handler(rig_id):
         if result.deleted_count == 0:
             return {"status": "error", "message": "Rig not found."}
 
-        print(f"[KheloMore] Deleted rig: {rig_id}")
+        print(f"[BookMyConsole] Deleted rig: {rig_id}")
         return {"status": "success", "message": "Rig successfully deleted."}
     except Exception as e:
         return {"status": "error", "message": f"Failed to delete rig: {e}"}
@@ -409,7 +409,7 @@ def reserve_rig_slots_handler(rig_id, data):
 
         date = data.get("date")
         slots = data.get("slots") # list of slot strings, e.g. ["10:00 AM - 11:00 AM"]
-        admin_email = data.get("admin_email") or "admin@khelomore.com"
+        admin_email = data.get("admin_email") or "admin@bookmyconsole.com"
 
         if not date or not slots:
             return {"status": "error", "message": "Parameters 'date' and 'slots' are required."}

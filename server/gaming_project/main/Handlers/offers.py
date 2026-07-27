@@ -1,5 +1,5 @@
 # offers.py
-# Handlers for managing cafe offers/promotions in KheloMore Gaming Hub
+# Handlers for managing cafe offers/promotions in BookMyConsole Gaming Hub
 
 from datetime import datetime, timezone, date
 import traceback

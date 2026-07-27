@@ -30,7 +30,7 @@ class BookingManualCompletionTests(SecurityTestCase):
         end = (now - timedelta(minutes=30)).strftime("%I:%M %p")
         slot = f"{start} - {end}"
         doc = {
-            "user_email": "walkin@khelomore.com", "user_name": "SECTEST",
+            "user_email": "walkin@bookmyconsole.com", "user_name": "SECTEST",
             "cafe_id": cafe_id, "cafe_name": "Sectest Cafe", "zone": "Standard",
             "date": today_str, "slots": [slot], "slot": slot,
             "price": 80, "code": "123456", "rig": "PC #01", "status": db_status,
