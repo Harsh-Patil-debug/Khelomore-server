@@ -1547,6 +1547,13 @@ class BookMyConsoleMeView(APIView):
             "xp":             user.get("xp", 0),
             "role":           user.get("role", role),
             "phone":          decrypt_phone_field(user.get("phone", "")),
+            # Needed so frontends can gate phone-onboarding to Google sign-ups only (a
+            # traditional email/password signup already requires a phone at registration
+            # time) - this endpoint runs on every session restore, so without this field
+            # here the frontend's "is this a Google user" check would always see undefined
+            # after a page reload/relogin, even though login/verify-otp responses do
+            # include it.
+            "auth_provider":  user.get("auth_provider", "traditional"),
         }
         return Response({"user": response_data}, status=status.HTTP_200_OK)
 
