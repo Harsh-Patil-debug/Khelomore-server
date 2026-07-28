@@ -412,8 +412,15 @@ def _is_allowed_oauth_redirect_target(target):
     """
     SECURITY: `state`/`return_url` is unauthenticated, attacker-influenceable input that
     becomes the final redirect target after Google auth completes (carrying the session
-    token in the query string). Only our own app schemes and our own frontend's exact
-    origin may be used — NOT an arbitrary https:// URL.
+    token in the query string). Only our own app schemes and our own frontends' exact
+    origins may be used — NOT an arbitrary https:// URL.
+
+    Checks the target's origin against settings.ALLOWED_ORIGINS (the same trusted-web-
+    origins list CORS already uses), not the old single FRONTEND_URL value — that env
+    var only ever held the mobile app's bookmyconsole:// scheme and was never actually
+    a website origin, so EVERY website (bookmyconsole.com, admin.bookmyconsole.com,
+    etc.) Google login was being rejected here as "Unauthorized redirect target"
+    regardless of how correctly CORS itself was configured for that same domain.
     """
     if not target:
         return False
@@ -422,9 +429,10 @@ def _is_allowed_oauth_redirect_target(target):
     try:
         from urllib.parse import urlparse
         parsed = urlparse(target)
-        frontend = urlparse(settings.FRONTEND_URL)
-        if parsed.scheme in ('http', 'https') and parsed.netloc and parsed.netloc == frontend.netloc:
-            return True
+        if parsed.scheme in ('http', 'https') and parsed.netloc:
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            if origin in settings.ALLOWED_ORIGINS:
+                return True
         if parsed.scheme == 'http' and parsed.hostname in ('localhost', '127.0.0.1'):
             return True
     except Exception:
