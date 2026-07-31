@@ -554,6 +554,51 @@ class BookMyConsoleUpdatePhoneView(APIView):
         return Response(result, status=status_code)
 
 
+class BookMyConsoleUpdateProfileView(APIView):
+    """
+    POST /auth/update-profile/
+    Header: Authorization: Bearer <token>
+    Body: { gamertag?, city?, gamer_id?, avatar_id? } (plain JSON — none of these are
+    sensitive PII, unlike phone, so this skips the AES envelope /auth/update-phone/ uses).
+    Returns: { status, user } with the fields as actually persisted.
+    """
+    def post(self, request):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+
+        result, status_code = auth_handler.bookmyconsole_update_profile(
+            email    = email,
+            updates  = request.data,
+            is_admin = check_is_admin(request),
+            role     = request.data.get("role", ""),
+        )
+        return Response(result, status=status_code)
+
+
+class BookMyConsoleUploadAvatarView(APIView):
+    """
+    POST /auth/upload-avatar/ (multipart/form-data, field name: "image")
+    Header: Authorization: Bearer <token>
+    Uploads the image to Cloudinary and stores the resulting URL on the user's account.
+    Returns: { status, avatar_url }
+    """
+    parser_classes = (MultiPartParser, FormParser)
+
+    def post(self, request):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+
+        result, status_code = auth_handler.bookmyconsole_upload_avatar(
+            email         = email,
+            uploaded_file = request.FILES.get("image"),
+            is_admin      = check_is_admin(request),
+            role          = request.data.get("role", ""),
+        )
+        return Response(result, status=status_code)
+
+
 from .Handlers import bookings_handler
 
 class BookedSlotsView(APIView):
@@ -1621,6 +1666,10 @@ class BookMyConsoleMeView(APIView):
             "xp":             user.get("xp", 0),
             "role":           user.get("role", role),
             "phone":          decrypt_phone_field(user.get("phone", "")),
+            "city":           user.get("city", ""),
+            "gamer_id":       user.get("gamer_id", ""),
+            "avatar_id":      user.get("avatar_id", "cyber_ghost"),
+            "avatar_url":     user.get("avatar_url", ""),
             # Needed so frontends can gate phone-onboarding to Google sign-ups only (a
             # traditional email/password signup already requires a phone at registration
             # time) - this endpoint runs on every session restore, so without this field

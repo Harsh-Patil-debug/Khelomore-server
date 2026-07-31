@@ -7,12 +7,15 @@ import qrcode
 import base64
 import pyotp
 import base64
+import cloudinary
+import cloudinary.uploader
 from Crypto.Random import get_random_bytes
 from datetime import datetime, timedelta, timezone
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad, pad
 from .db_connection import db_main
 from . import input_validation
+from .upload_validation import validate_image_upload
 from dotenv import load_dotenv
 import random
 from .email_handler import send_admin_otp_email, send_sms_otp, send_welcome_email
@@ -811,3 +814,88 @@ def bookmyconsole_update_phone(email, phone_encrypted, iv, is_admin=False, role=
 
     enc_resp, iv2 = encrypt_data(json.dumps(response_data, default=_s), ENCRYPTION_KEY)
     return {"encrypted_response": enc_resp, "iv": iv2}, 200
+
+
+PROFILE_AVATAR_IDS = {"cyber_ghost", "neon_shadow", "alpha_recon", "glitch_phantom"}
+
+
+def bookmyconsole_update_profile(email, updates: dict, is_admin=False, role=""):
+    """Updates a user's editable profile fields (gamertag, city, gamer_id, avatar_id).
+    Previously these all lived in AsyncStorage only on the device — a fresh install or a
+    second device never saw them, and a re-login would silently revert to whatever the
+    server still had (nothing). This is the real, server-persisted version."""
+    coll = get_user_collection(is_admin, role)
+    user = coll.find_one({"email": email})
+    if not user:
+        return {"error": "User not found."}, 404
+
+    set_fields = {}
+
+    if "gamertag" in updates:
+        gamertag = str(updates["gamertag"]).strip()
+        if not gamertag:
+            return {"error": "Gamertag cannot be empty."}, 400
+        if len(gamertag) > 40:
+            return {"error": "Gamertag must be at most 40 characters."}, 400
+        set_fields["gamertag"] = gamertag
+
+    if "city" in updates:
+        set_fields["city"] = str(updates["city"]).strip()[:60]
+
+    if "gamer_id" in updates:
+        set_fields["gamer_id"] = str(updates["gamer_id"]).strip()[:40]
+
+    if "avatar_id" in updates:
+        avatar_id = str(updates["avatar_id"]).strip()
+        if avatar_id not in PROFILE_AVATAR_IDS:
+            return {"error": f"Invalid avatar_id. Must be one of: {', '.join(sorted(PROFILE_AVATAR_IDS))}."}, 400
+        set_fields["avatar_id"] = avatar_id
+
+    if not set_fields:
+        return {"error": "No valid profile fields to update."}, 400
+
+    coll.update_one({"_id": user["_id"]}, {"$set": set_fields})
+    updated_user = coll.find_one({"_id": user["_id"]})
+
+    return {
+        "status": "success",
+        "user": {
+            "id":         str(updated_user["_id"]),
+            "email":      updated_user.get("email"),
+            "gamertag":   updated_user.get("gamertag"),
+            "city":       updated_user.get("city", ""),
+            "gamer_id":   updated_user.get("gamer_id", ""),
+            "avatar_id":  updated_user.get("avatar_id", "cyber_ghost"),
+            "avatar_url": updated_user.get("avatar_url", ""),
+        },
+    }, 200
+
+
+def bookmyconsole_upload_avatar(email, uploaded_file, is_admin=False, role=""):
+    """Uploads a user's profile picture to Cloudinary and stores the resulting secure_url
+    on their account. Mirrors the same validate-then-upload pattern used for cafe images
+    (cafes.py) so avatars go through the same file-type/size checks."""
+    if uploaded_file is None:
+        return {"error": "No image file provided."}, 400
+
+    validation_error = validate_image_upload(uploaded_file)
+    if validation_error:
+        return {"error": validation_error}, 400
+
+    coll = get_user_collection(is_admin, role)
+    user = coll.find_one({"email": email})
+    if not user:
+        return {"error": "User not found."}, 404
+
+    try:
+        upload_result = cloudinary.uploader.upload(uploaded_file, folder="bookmyconsole/avatars")
+        avatar_url = upload_result.get("secure_url")
+    except Exception as e:
+        return {"error": f"Image upload failed: {e}"}, 500
+
+    if not avatar_url:
+        return {"error": "Image upload failed."}, 500
+
+    coll.update_one({"_id": user["_id"]}, {"$set": {"avatar_url": avatar_url}})
+
+    return {"status": "success", "avatar_url": avatar_url}, 200

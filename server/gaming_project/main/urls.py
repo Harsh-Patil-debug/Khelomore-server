@@ -29,7 +29,7 @@ urlpatterns = [
     path('cafes/<str:cafe_id>/razorpay-credentials/verify-password/', CafeRazorpayPasswordVerifyView.as_view(), name='cafe_razorpay_password_verify'),
     path('cafes/<str:cafe_id>/payments/create-order/', CafeBookingOrderCreateView.as_view(), name='cafe_booking_order_create'),
 
-    # ── Subscriptions (₹1500/month cafe-owner platform fee) ──────────────────────
+    # ── Subscriptions (₹1599/month cafe-owner platform fee) ──────────────────────
     path('cafes/<str:cafe_id>/subscription/', CafeSubscriptionDetailView.as_view(), name='cafe_subscription'),
     path('cafes/<str:cafe_id>/subscription/create-order/', CafeSubscriptionOrderView.as_view(), name='cafe_subscription_order'),
     path('cafes/<str:cafe_id>/subscription/trial-welcome-shown/', CafeSubscriptionTrialWelcomeShownView.as_view(), name='cafe_subscription_trial_welcome_shown'),
@@ -82,6 +82,8 @@ urlpatterns = [
     path('auth/forgot-password/', BookMyConsoleForgotPasswordView.as_view(), name='auth_forgot_password'),
     path('auth/reset-password/', BookMyConsoleResetPasswordView.as_view(), name='auth_reset_password'),
     path('auth/update-phone/', BookMyConsoleUpdatePhoneView.as_view(), name='auth_update_phone'),
+    path('auth/update-profile/', BookMyConsoleUpdateProfileView.as_view(), name='auth_update_profile'),
+    path('auth/upload-avatar/', BookMyConsoleUploadAvatarView.as_view(), name='auth_upload_avatar'),
     path('auth/logout/',     BookMyConsoleLogoutView.as_view(),    name='auth_logout'),
     path('auth/me/',         BookMyConsoleMeView.as_view(),        name='auth_me'),
 

@@ -374,7 +374,7 @@ def get_cafes_handler(latitude=None, longitude=None, include_deleted=False):
         # Retrieve all cafes and sort by calculated distance (nearest first)
         query: dict = {} if include_deleted else {"is_deleted": {"$ne": True}}
         if not include_deleted:
-            # A cafe more than the grace period past its ₹1500/month subscription due
+            # A cafe more than the grace period past its ₹1599/month subscription due
             # date is hidden from the public listing until paid — the cafe owner's own
             # dashboard is unaffected (it goes through get_my_cafes_handler, not this).
             # Cafes that predate this feature (no subscription_grace_until set yet) are
