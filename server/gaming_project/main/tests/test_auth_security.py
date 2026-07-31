@@ -70,7 +70,7 @@ class SuperAdminRoleEscalationTests(SecurityTestCase):
             "gamertag": "EXISTING_SA",
             "status": "Active",
             "role": "super_admin",
-            "otp_code": otp_code,
+            "otp_code": auth_handler.hash_otp(otp_code),
             "otp_expiry": datetime.now(auth_handler.IST) + timedelta(minutes=10),
         }
         result = self.db.super_admin.insert_one(doc)
@@ -123,7 +123,7 @@ class OtpLockoutTests(SecurityTestCase):
             "email": email,
             "gamertag": "SECTEST",
             "status": "Pending",
-            "otp_code": otp_code,
+            "otp_code": auth_handler.hash_otp(otp_code),
             "otp_expiry": datetime.now(auth_handler.IST) + timedelta(minutes=10),
             "role": "user",
         }
@@ -176,7 +176,7 @@ class OtpLockoutTests(SecurityTestCase):
         # bookmyconsole_login's update_one / the resend-otp view do).
         self.db.users.update_one(
             {"email": email},
-            {"$set": {"otp_code": "555555"}, "$unset": {"otp_attempts": ""}},
+            {"$set": {"otp_code": auth_handler.hash_otp("555555")}, "$unset": {"otp_attempts": ""}},
         )
         result, code = self._verify(email, "555555")
         self.assertEqual(code, 200)

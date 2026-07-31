@@ -87,7 +87,7 @@ class ResetPasswordTests(SecurityTestCase):
         self.db[collection].update_one(
             {"email": email},
             {"$set": {
-                "reset_otp_code": otp,
+                "reset_otp_code": auth_handler.hash_otp(otp),
                 "reset_otp_expiry": datetime.now(timezone.utc) + timedelta(minutes=minutes_from_now),
             }}
         )
@@ -239,4 +239,4 @@ class ResetPasswordTests(SecurityTestCase):
         # The real users-collection account's OTP must be untouched by that misdirected
         # attempt, and its original password must still work.
         doc = self.db.users.find_one({"email": email})
-        self.assertEqual(doc.get("reset_otp_code"), "654321")
+        self.assertEqual(doc.get("reset_otp_code"), auth_handler.hash_otp("654321"))

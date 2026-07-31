@@ -276,23 +276,6 @@ class BookMyConsoleVerifyOTPView(APIView):
         return response_obj
 
 
-class BookMyConsoleGoogleAuthView(APIView):
-    """
-    POST /auth/google/
-    Body: { gmail, gamertag, iv }           — AES-CBC encrypted
-    Returns: encrypted { token, user }      — JWT issued directly (no OTP)
-    """
-    def post(self, request):
-        data = request.data
-        result, status_code = auth_handler.bookmyconsole_google_auth(
-            gmail    = data.get("gmail", ""),
-            gamertag = data.get("gamertag", ""),
-            iv       = data.get("iv", ""),
-            is_admin = check_is_admin(request),
-        )
-        return Response(result, status=status_code)
-
-
 class BookMyConsoleResendOTPView(APIView):
     """
     POST /auth/resend-otp/
@@ -351,7 +334,7 @@ class BookMyConsoleResendOTPView(APIView):
         otp_expiry = datetime.now(auth_handler.IST) + timedelta(minutes=auth_handler.get_otp_expiry_minutes(role))
         coll.update_one(
             {"_id": user["_id"]},
-            {"$set": {"otp_code": otp_code, "otp_expiry": otp_expiry}, "$unset": {"otp_attempts": ""}}
+            {"$set": {"otp_code": auth_handler.hash_otp(otp_code), "otp_expiry": otp_expiry}, "$unset": {"otp_attempts": ""}}
         )
         gamertag = user.get("gamertag") or user.get("first_name", "PLAYER")
         send_otp_email(dec_email, otp_code, gamertag=gamertag, purpose="resend")

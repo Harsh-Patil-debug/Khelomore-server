@@ -7,6 +7,8 @@ import qrcode
 import base64
 import pyotp
 import base64
+import hmac
+import hashlib
 import cloudinary
 import cloudinary.uploader
 from Crypto.Random import get_random_bytes
@@ -99,6 +101,24 @@ def verify_password(stored_hash, input_password):
         return ph.verify(stored_hash, input_password)
     except VerifyMismatchError:
         return False
+
+def hash_otp(otp: str) -> str:
+    """Hashes an OTP for storage. Deliberately HMAC-SHA256, not Argon2id like passwords —
+    Argon2's memory/CPU cost is the point for passwords (resist offline brute-force of a
+    high-entropy secret an attacker gets unlimited guesses at), but this Render instance
+    already had to have its Argon2 params shrunk once to stop hitting gunicorn's worker
+    timeout on the free tier (see the `ph = PasswordHasher(...)` comment above) — adding
+    Argon2 calls to every OTP verification too would make that worse for no real benefit.
+    A 6-digit OTP's actual protection is its short expiry and MAX_OTP_ATTEMPTS lockout,
+    both already enforced before this hash is ever compared; hashing storage is
+    defense-in-depth against a DB leak, not the primary defense, so a fast, correct HMAC
+    is the right tool here."""
+    return hmac.new(ENCRYPTION_KEY, otp.encode("utf-8"), hashlib.sha256).hexdigest()
+
+def verify_otp_hash(stored_hash: str, input_otp: str) -> bool:
+    if not stored_hash or not input_otp:
+        return False
+    return hmac.compare_digest(hash_otp(input_otp), stored_hash)
 
 def encrypt_data(plain_text: str, key: bytes) -> Tuple[str, str]:
     iv = get_random_bytes(16)
@@ -298,7 +318,7 @@ def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=F
         "password_hash": password_hash,
         "phone":         encrypt_phone_field(dec_phone),
         "status":        "Pending",
-        "otp_code":      otp_code,
+        "otp_code":      hash_otp(otp_code),
         "otp_expiry":    otp_expiry,
         "xp":            0,
         "rank":          "Recruit PRO I",
@@ -367,7 +387,7 @@ def bookmyconsole_login(email, password, iv, is_admin=False, role=""):
     otp_expiry = datetime.now(IST) + timedelta(minutes=get_otp_expiry_minutes(role))
     coll.update_one(
         {"_id": user["_id"]},
-        {"$set": {"otp_code": otp_code, "otp_expiry": otp_expiry}, "$unset": {"otp_attempts": ""}}
+        {"$set": {"otp_code": hash_otp(otp_code), "otp_expiry": otp_expiry}, "$unset": {"otp_attempts": ""}}
     )
 
     gamertag = user.get("gamertag") or user.get("first_name", "PLAYER")
@@ -407,7 +427,7 @@ def bookmyconsole_verify_otp(email, otp_code, iv, is_admin=False, role=""):
     if datetime.now(IST) > otp_exp:
         return {"error": "OTP has expired. Please request a new code."}, 400
 
-    if stored_otp != dec_otp:
+    if not verify_otp_hash(stored_otp, dec_otp):
         # SECURITY: bound OTP guessing — a 6-digit code has only 1,000,000 possibilities,
         # so unlimited attempts against a single OTP would make it brute-forceable.
         # Invalidate the OTP outright after too many wrong guesses.
@@ -511,7 +531,7 @@ def bookmyconsole_forgot_password(email, iv, is_admin=False, role=""):
     otp_expiry = datetime.now(IST) + timedelta(minutes=get_otp_expiry_minutes(role))
     coll.update_one(
         {"_id": user["_id"]},
-        {"$set": {"reset_otp_code": otp_code, "reset_otp_expiry": otp_expiry},
+        {"$set": {"reset_otp_code": hash_otp(otp_code), "reset_otp_expiry": otp_expiry},
          "$unset": {"reset_otp_attempts": ""}}
     )
 
@@ -553,7 +573,7 @@ def bookmyconsole_reset_password(email, otp_code, new_password, iv, is_admin=Fal
     if datetime.now(IST) > otp_exp:
         return {"error": "Reset code has expired. Please request a new one."}, 400
 
-    if stored_otp != dec_otp:
+    if not verify_otp_hash(stored_otp, dec_otp):
         # SECURITY: bound OTP guessing exactly like login/signup OTPs — a 6-digit code
         # has only 1,000,000 possibilities, so unlimited attempts would make it
         # brute-forceable well within the code's expiry window.
@@ -584,70 +604,6 @@ def bookmyconsole_reset_password(email, otp_code, new_password, iv, is_admin=Fal
 
     response_data = {"message": "Password reset successfully. Please log in with your new password."}
     enc_resp, iv2 = encrypt_data(json.dumps(response_data), ENCRYPTION_KEY)
-    return {"encrypted_response": enc_resp, "iv": iv2}, 200
-
-
-def bookmyconsole_google_auth(gmail, gamertag, iv, is_admin=False, role=""):
-    """Google Sign-In: find or create user, return JWT DIRECTLY (no OTP needed)."""
-    try:
-        dec_email    = decrypt_data(gmail, iv).strip().lower()
-        dec_gamertag = decrypt_data(gamertag, iv).strip()
-    except Exception as e:
-        return {"error": f"Decryption failed: {str(e)}"}, 400
-
-    coll = get_user_collection(is_admin, role)
-    if is_admin:
-        cafe_exists = db_main.cafes.find_one({"owner_email": dec_email, "is_deleted": {"$ne": True}})
-        if not cafe_exists:
-            return {"error": "This email is not authorized. Please contact the platform Super Admin to list your cafe first."}, 403
-
-    user = coll.find_one({"email": dec_email})
-    if user and user.get("status") == "Blocked":
-        return {"error": "This account has been blocked."}, 403
-
-    is_new = not user
-    if is_new:
-        result = coll.insert_one({
-            "gamertag":      dec_gamertag.upper().replace(" ", "_"),
-            "email":         dec_email,
-            "auth_provider": "google",
-            "status":        "Active",
-            "xp":            150,
-            "rank":          "Recruit PRO I",
-            "createdAt":     datetime.now(IST),
-            "role":          role if role else ("admin" if is_admin else "user"),
-        })
-        user = coll.find_one({"_id": result.inserted_id})
-        try:
-            from .email_handler import send_welcome_email
-            send_welcome_email(dec_email, dec_gamertag)
-        except Exception:
-            pass
-
-    token = generate_token(dec_email, is_admin=is_admin, role=role)
-    response_data = {
-        "token":   token,
-        "message": "Google login successful",
-        "is_new":  is_new,
-        "user": {
-            "id":             str(user["_id"]),
-            "email":          dec_email,
-            "gamertag":       user.get("gamertag") or dec_gamertag,
-            "rank":           user.get("rank", "Recruit PRO I"),
-            "xp":             user.get("xp", 0),
-            "auth_provider":  user.get("auth_provider", "google"),
-            "total_playtime": user.get("total_playtime", 140),
-            "role":           user.get("role", "admin" if is_admin else "user"),
-            "phone":          decrypt_phone_field(user.get("phone", "")),
-        }
-    }
-
-    def _s(o):
-        if isinstance(o, ObjectId): return str(o)
-        if isinstance(o, datetime): return o.isoformat()
-        raise TypeError
-
-    enc_resp, iv2 = encrypt_data(json.dumps(response_data, default=_s), ENCRYPTION_KEY)
     return {"encrypted_response": enc_resp, "iv": iv2}, 200
 
 

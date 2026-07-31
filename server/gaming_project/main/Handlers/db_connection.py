@@ -36,6 +36,16 @@ def get_db():
     return _client[MONGO_DB_NAME]
 
 
+def get_client():
+    """Returns the raw MongoClient (not a database) — needed for multi-document ACID
+    transactions (client.start_session()), which operate at the client level, not the
+    database level. Atlas connections are always backed by a replica set, so transactions
+    are supported."""
+    if get_db() is None:  # ensures _client is connected, reuses the same connect-once logic
+        return None
+    return _client
+
+
 class _DbProxy:
     """
     Lazy MongoDB proxy.

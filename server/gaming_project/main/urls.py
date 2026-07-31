@@ -89,7 +89,6 @@ urlpatterns = [
     path('auth/me/',         BookMyConsoleMeView.as_view(),        name='auth_me'),
 
     # ── Auth (Google — JWT direct, no OTP) ────────────────────────────────────
-    path('auth/google/',     BookMyConsoleGoogleAuthView.as_view(), name='auth_google'),
     path('auth/google/login/', BookMyConsoleGoogleLoginView.as_view(), name='auth_google_login'),
     path('auth/google/callback/', BookMyConsoleGoogleCallbackView.as_view(), name='auth_google_callback'),
 

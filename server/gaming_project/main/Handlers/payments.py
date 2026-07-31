@@ -71,6 +71,15 @@ def verify_razorpay_payment(order_id, payment_id, signature, expected_amount_pai
     Callers that don't pass cafe_id (subscriptions, tournament registration) keep using
     the platform's own account, unchanged.
     """
+    # SECURITY: order_id/payment_id/signature arrive straight from the client's JSON body.
+    # A dict here (e.g. {"$ne": None}) instead of a plain string would corrupt the
+    # cafe_payment_orders/used_razorpay_payments filters below into matching anything.
+    # The real gate is the cryptographic signature check further down, which a forged
+    # dict can't pass — but that shouldn't be the only thing standing between a type-
+    # confused filter and an unintended match, so fail closed here explicitly too.
+    if not isinstance(order_id, str) or not isinstance(payment_id, str) or not isinstance(signature, str):
+        return False
+
     key_id = getattr(settings, 'RAZORPAY_KEY_ID', '')
     key_secret = getattr(settings, 'RAZORPAY_KEY_SECRET', '')
 

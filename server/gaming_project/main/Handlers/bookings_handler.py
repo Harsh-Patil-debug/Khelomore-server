@@ -1,10 +1,30 @@
 import random
 from datetime import datetime, timezone, timedelta
 from bson.objectid import ObjectId
-from .db_connection import db_main
+from pymongo.errors import DuplicateKeyError, OperationFailure
+from .db_connection import db_main, get_client
 from .email_handler import send_booking_confirmation_email, send_booking_admin_notification_email
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+_slot_locks_index_ensured = False
+
+
+def _ensure_slot_locks_index():
+    """Lazily creates the unique index backing atomic slot claiming (see
+    create_booking_handler). One document per (cafe_id, rig, date, slot) — the unique
+    index is what makes a double-booking attempt fail at the database level instead of
+    racing on an application-level read-then-write check, which has always had a gap
+    between the availability read and the booking insert."""
+    global _slot_locks_index_ensured
+    if not _slot_locks_index_ensured:
+        try:
+            db_main.slot_locks.create_index(
+                [("cafe_id", 1), ("rig", 1), ("date", 1), ("slot", 1)], unique=True
+            )
+        except Exception:
+            pass
+        _slot_locks_index_ensured = True
 
 def parse_slot_times(date_str: str, slots: list) -> tuple:
     """
@@ -336,11 +356,57 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
 
             inserted_bookings.append(doc)
 
-        if len(inserted_bookings) > 1:
-            db_main.bookings.insert_many(inserted_bookings)
-        else:
-            result = db_main.bookings.insert_one(inserted_bookings[0])
-            inserted_bookings[0]["_id"] = result.inserted_id
+        # 4. Atomically claim every slot before persisting the booking. The availability
+        # check in step 1 and this claim are separated by rig resolution + a real Razorpay
+        # payment round-trip — plenty of time for two concurrent requests to both pass
+        # step 1's read, both pay, and both reach here for the same rig/slot. A unique
+        # index (cafe_id, rig, date, slot) makes the second claim fail at the database
+        # level rather than silently double-booking; wrapping the claim and the booking
+        # insert in one transaction means either both succeed or neither does.
+        _ensure_slot_locks_index()
+        clean_rig_key = rig.split("·")[0].strip() if rig else ""
+        lock_docs = [{"cafe_id": cafe_id, "rig": clean_rig_key, "date": date, "slot": s} for s in slots]
+
+        client = get_client()
+        if client is None:
+            return {"status": "error", "message": "Database connection unavailable."}, 500
+
+        try:
+            with client.start_session() as session:
+                with session.start_transaction():
+                    db_main.slot_locks.insert_many(lock_docs, ordered=True, session=session)
+                    if len(inserted_bookings) > 1:
+                        db_main.bookings.insert_many(inserted_bookings, session=session)
+                    else:
+                        result = db_main.bookings.insert_one(inserted_bookings[0], session=session)
+                        inserted_bookings[0]["_id"] = result.inserted_id
+        except (DuplicateKeyError, OperationFailure) as e:
+            # Inside a transaction, a duplicate-key write error on slot_locks doesn't
+            # surface as a bare DuplicateKeyError — pymongo wraps it in OperationFailure/
+            # BulkWriteError, with code 11000 nested in the error's details. Check for
+            # that specifically rather than treating every OperationFailure as the same
+            # "slot taken" case (a real transaction/infra failure should stay a 500, not
+            # be mislabeled as a conflict).
+            is_conflict = getattr(e, "code", None) == 11000 or "E11000" in str(e)
+            if is_conflict:
+                # Someone else claimed one of these exact (rig, date, slot) combinations
+                # first — the transaction was rolled back entirely, nothing was written.
+                # Payment was already captured via Razorpay before this call (the client
+                # completes checkout before calling this endpoint), so a race loss here
+                # means the payment needs a manual refund — a real residual gap, not
+                # something this fix resolves, since automated refunds are a separate
+                # feature. Flagged clearly in the error message.
+                return {
+                    "status": "error",
+                    "message": (
+                        "That station/slot was just booked by someone else. Your payment was "
+                        "captured — contact support for a refund, and please try a different slot."
+                    ),
+                }, 409
+            # Transactions require a replica set (true for MongoDB Atlas, which this
+            # project uses) — if that's ever not the case, fail loudly rather than
+            # silently falling back to the non-atomic path this fix exists to remove.
+            return {"status": "error", "message": f"Booking transaction failed: {e}"}, 500
 
         for doc in inserted_bookings:
             doc["id"] = str(doc["_id"])
