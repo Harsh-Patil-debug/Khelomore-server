@@ -60,6 +60,15 @@ urlpatterns = [
     # ── User Favorites ────────────────────────────────────────────────────────
     path('users/favorites/', UserFavoritesView.as_view(), name='user_favorites'),
 
+    # ── Notifications ─────────────────────────────────────────────────────────
+    path('push-tokens/register/', RegisterPushTokenView.as_view(), name='register_push_token'),
+    path('notifications/broadcast/', BroadcastNotificationView.as_view(), name='broadcast_notification'),
+    path('notifications/broadcasts/', BroadcastNotificationView.as_view(), name='list_broadcasts'),
+
+    # ── Support ───────────────────────────────────────────────────────────────
+    path('support/info/', SupportInfoView.as_view(), name='support_info'),
+    path('support/contact/', SupportQueryView.as_view(), name='support_contact'),
+
     # ── Super Admin User Management ───────────────────────────────────────────
     path('users/', UserListView.as_view(), name='super_admin_users'),
     path('users/<str:user_id>/toggle-suspend/', UserStatusToggleView.as_view(), name='super_admin_user_suspend'),

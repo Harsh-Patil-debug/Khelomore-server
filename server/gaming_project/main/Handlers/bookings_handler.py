@@ -2,6 +2,7 @@ import random
 from datetime import datetime, timezone, timedelta
 from bson.objectid import ObjectId
 from .db_connection import db_main
+from .email_handler import send_booking_confirmation_email, send_booking_admin_notification_email
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -189,11 +190,25 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
             rig = rig.replace("•", "·").replace("  ", " ").strip()
             rig_name = rig.split("·")[0].strip()
             db_rig = db_main.rigs.find_one({"cafe_id": cafe_id, "name": rig_name})
-            if db_rig and db_rig.get("status") == "maintenance":
+            # SECURITY/INTEGRITY: a `rig` that doesn't match any real station for this
+            # cafe used to be accepted as-is (silently stored verbatim, whatever the
+            # client sent) — only a MATCHING rig ever got checked for anything at all.
+            # Reject instead: a station either exists and is bookable, or it doesn't.
+            if not db_rig:
+                return {
+                    "status": "error",
+                    "message": f"Station '{rig_name}' doesn't exist at this cafe."
+                }, 400
+            if db_rig.get("status") == "maintenance":
                 return {
                     "status": "error",
                     "message": f"Rig '{rig_name}' is currently under maintenance and cannot be booked."
                 }, 400
+            # Rebuild `rig` from the DB's own fields rather than trusting the client's
+            # exact string — the name/spec that ends up stored and emailed is always
+            # exactly what's in the rigs collection, never client-supplied text.
+            db_rig_spec = db_rig.get("spec", "")
+            rig = f"{db_rig.get('name')} · {db_rig_spec}" if db_rig_spec else db_rig.get("name")
         else:
             # Rig auto-assignment
             rigs = list(db_main.rigs.find({"cafe_id": cafe_id}))
@@ -332,6 +347,31 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
             del doc["_id"]
             if isinstance(doc.get("createdAt"), datetime):
                 doc["createdAt"] = doc["createdAt"].isoformat()
+
+        # Confirmation emails — never let a Brevo hiccup fail a booking that already
+        # succeeded in the DB. Summed across every slot-group so the user/cafe get one
+        # email covering the whole booking, not one per contiguous slot block.
+        try:
+            primary = inserted_bookings[0]
+            full_slot_str = ", ".join(sorted({s for b in inserted_bookings for s in b.get("slots", [])}))
+            total_booking_price = sum(b.get("price", 0) for b in inserted_bookings)
+            send_booking_confirmation_email(
+                recipient=user_email, user_name=user_name, cafe_name=cafe_name,
+                rig=primary.get("rig"), zone=zone, date=date, slot=full_slot_str,
+                price=total_booking_price, code=primary.get("code"),
+            )
+            cafe_owner_email = None
+            if cafe_id and ObjectId.is_valid(cafe_id):
+                cafe_doc = db_main.cafes.find_one({"_id": ObjectId(cafe_id)}, {"owner_email": 1})
+                cafe_owner_email = cafe_doc.get("owner_email") if cafe_doc else None
+            if cafe_owner_email:
+                send_booking_admin_notification_email(
+                    recipient=cafe_owner_email, user_name=user_name, user_phone=user_phone,
+                    cafe_name=cafe_name, rig=primary.get("rig"), zone=zone, date=date,
+                    slot=full_slot_str, price=total_booking_price, code=primary.get("code"),
+                )
+        except Exception as email_err:
+            print(f"[BookMyConsole] Booking confirmation email failed (booking still saved): {email_err}")
 
         return {
             "status": "success",

@@ -12,7 +12,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.throttling import ScopedRateThrottle
-from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, auth_handler, bookings_handler, auth_middleware, favorites, sessions, offers, users, partner_applications, subscriptions
+from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, auth_handler, bookings_handler, auth_middleware, favorites, sessions, offers, users, partner_applications, subscriptions, notifications, support
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
@@ -1194,6 +1194,72 @@ class UserFavoritesView(APIView):
             
         cafe_id = request.data.get("cafe_id")
         result, status_code = favorites.toggle_favorite_handler(email, cafe_id)
+        return Response(result, status=status_code)
+
+
+class RegisterPushTokenView(APIView):
+    """POST /push-tokens/register/ — a logged-in gamer registers their device's Expo push
+    token so super-admin broadcasts (and future targeted notifications) can reach them."""
+    def post(self, request):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+
+        expo_push_token = request.data.get("expo_push_token") or request.data.get("token")
+        platform = request.data.get("platform")
+        result, status_code = notifications.register_push_token_handler(email, expo_push_token, platform)
+        return Response(result, status=status_code)
+
+
+class BroadcastNotificationView(APIView):
+    """
+    GET  /notifications/broadcasts/ — recent broadcast history (super admin only).
+    POST /notifications/broadcast/  — send a push notification to an audience (super admin only).
+    """
+    def get(self, request):
+        _, error_response = auth_middleware.authenticate_super_admin_request(request)
+        if error_response:
+            return error_response
+        result, status_code = notifications.list_broadcasts_handler()
+        return Response(result, status=status_code)
+
+    def post(self, request):
+        sent_by, error_response = auth_middleware.authenticate_super_admin_request(request)
+        if error_response:
+            return error_response
+
+        title = request.data.get("title")
+        body = request.data.get("body") or request.data.get("message")
+        audience = request.data.get("audience", "all_users")
+        channel = request.data.get("channel", "push")
+        result, status_code = notifications.send_broadcast_notification_handler(title, body, audience, sent_by, channel)
+        return Response(result, status=status_code)
+
+
+class SupportInfoView(APIView):
+    """GET /support/info/ — public: the support email/phone shown on the Contact
+    Support screen. No auth needed, not sensitive."""
+    def get(self, request):
+        result, status_code = support.get_support_info_handler()
+        return Response(result, status=status_code)
+
+
+class SupportQueryView(APIView):
+    """POST /support/contact/ — forwards a support query to SUPPORT_EMAIL. Used by the
+    gamer app, the cafe-owner dashboard, AND the public marketing website — auth is
+    optional here (unlike most endpoints): if a valid JWT/cookie is present (gamer or
+    cafe-owner, authenticate_request covers both), that verified email is used;
+    otherwise this is a public site visitor who isn't logged in at all, and must supply
+    their own email in the request body instead."""
+    def post(self, request):
+        email, _ = auth_middleware.authenticate_request(request)
+        if not email:
+            email = request.data.get("email")
+
+        name = request.data.get("name")
+        message = request.data.get("message")
+        source = request.data.get("source", "App")
+        result, status_code = support.create_support_query_handler(email, name, message, source)
         return Response(result, status=status_code)
 
 

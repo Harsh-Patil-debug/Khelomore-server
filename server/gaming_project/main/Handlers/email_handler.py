@@ -14,6 +14,7 @@ address — must be verified as a "sender" in the Brevo dashboard first).
 """
 
 import os
+import html
 import requests
 from email.utils import parseaddr
 from dotenv import load_dotenv
@@ -31,14 +32,29 @@ _parsed_name, _parsed_email = parseaddr(os.getenv("EMAIL_SENDER", ""))
 SENDER_EMAIL = _parsed_email or os.getenv("EMAIL_HOST_USER", "")
 SENDER_NAME = _parsed_name or "BookMyConsole Gaming Hub"
 
+# Contact-support inbox — falls back to the sender address if not explicitly set.
+SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "") or SENDER_EMAIL
+SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "")
 
-def _send_email(recipient: str, subject: str, html_body: str) -> bool:
-    """Core sender — Brevo's HTTP transactional email API."""
+
+def _send_email(recipient: str, subject: str, html_body: str, reply_to: str = None) -> bool:
+    """Core sender — Brevo's HTTP transactional email API. `reply_to` lets a recipient
+    hit "Reply" and land in the actual sender's inbox instead of the platform's own
+    (used by support-query emails, where support should be able to reply straight to
+    the gamer/cafe owner who wrote in)."""
     if not BREVO_API_KEY or not SENDER_EMAIL:
         print(f"[EMAIL] Brevo credentials missing — skipping send to {recipient}")
         return False
 
     try:
+        payload = {
+            "sender": {"name": SENDER_NAME, "email": SENDER_EMAIL},
+            "to": [{"email": recipient}],
+            "subject": subject,
+            "htmlContent": html_body,
+        }
+        if reply_to:
+            payload["replyTo"] = {"email": reply_to}
         response = requests.post(
             BREVO_API_URL,
             headers={
@@ -46,12 +62,7 @@ def _send_email(recipient: str, subject: str, html_body: str) -> bool:
                 "api-key": BREVO_API_KEY,
                 "content-type": "application/json",
             },
-            json={
-                "sender": {"name": SENDER_NAME, "email": SENDER_EMAIL},
-                "to": [{"email": recipient}],
-                "subject": subject,
-                "htmlContent": html_body,
-            },
+            json=payload,
             timeout=15,
         )
         if response.status_code >= 400:
@@ -208,6 +219,230 @@ def send_admin_otp_email(recipient: str, otp: str, name: str = "Admin") -> bool:
     if settings.DEBUG:
         print(f"[ADMIN OTP] {name} / {recipient} → {otp}")
     return send_otp_email(recipient, otp, gamertag=name, purpose="admin login")
+
+
+def send_booking_confirmation_email(recipient: str, user_name: str, cafe_name: str, rig: str, zone: str,
+                                     date: str, slot: str, price: int, code: str) -> bool:
+    """Sent to the gamer right after a booking is created — confirms which station/rig at
+    which cafe they've booked, so there's no ambiguity about where to show up."""
+    # SECURITY: user_name/rig/cafe_name/zone/date/slot are all client-controlled (rig and
+    # customerName in particular have no server-side allowlist) — HTML-escape everything
+    # before interpolating into the email body so a crafted booking can't inject markup
+    # (fake links, spoofed "official" content, etc) into a transactional email.
+    user_name = html.escape(user_name or "")
+    cafe_name = html.escape(cafe_name or "")
+    rig = html.escape(rig) if rig else rig
+    zone = html.escape(zone or "")
+    date = html.escape(date or "")
+    slot = html.escape(slot or "")
+    code = html.escape(code or "")
+    subject = f"BookMyConsole — Booking Confirmed at {cafe_name}"
+
+    html_body = f"""
+    <html>
+    <body style="margin:0;padding:0;background-color:#0B0C10;font-family:'Courier New',monospace;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="background:#0B0C10;padding:50px 20px;">
+        <tr><td align="center">
+          <table width="520" cellpadding="0" cellspacing="0"
+                 style="background:#0E0E12;border:1px solid #E11D2E;border-radius:16px;overflow:hidden;">
+            <tr>
+              <td align="center" style="background:#0B0C10;padding:36px 0 24px;">
+                <p style="margin:0;font-size:11px;letter-spacing:6px;color:#E11D2E;text-transform:uppercase;">
+                  ⚡ BOOKMYCONSOLE GAMING HUB ⚡
+                </p>
+                <h1 style="margin:10px 0 0;font-size:26px;letter-spacing:3px;color:#ffffff;text-transform:uppercase;">
+                  BOOKING CONFIRMED
+                </h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px 40px;">
+                <p style="color:#9CA3AF;font-size:13px;margin:0 0 24px;letter-spacing:1px;">
+                  Operator <strong style="color:#ffffff;">{user_name}</strong>, your station is reserved.
+                </p>
+                <table width="100%" cellpadding="0" cellspacing="0" style="background:#0B0C10;border:1px solid #1f1f28;border-radius:12px;">
+                  <tr><td style="padding:16px 20px;border-bottom:1px solid #1f1f28;">
+                    <p style="margin:0;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">Gaming Cafe</p>
+                    <p style="margin:4px 0 0;font-size:15px;color:#ffffff;font-weight:bold;">{cafe_name}</p>
+                  </td></tr>
+                  <tr><td style="padding:16px 20px;border-bottom:1px solid #1f1f28;">
+                    <p style="margin:0;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">Station / Rig</p>
+                    <p style="margin:4px 0 0;font-size:15px;color:#E11D2E;font-weight:bold;">{rig or "Auto-assigned on arrival"}</p>
+                  </td></tr>
+                  <tr><td style="padding:16px 20px;border-bottom:1px solid #1f1f28;">
+                    <p style="margin:0;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">Zone</p>
+                    <p style="margin:4px 0 0;font-size:14px;color:#ffffff;">{zone}</p>
+                  </td></tr>
+                  <tr><td style="padding:16px 20px;border-bottom:1px solid #1f1f28;">
+                    <p style="margin:0;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">Date &amp; Slot</p>
+                    <p style="margin:4px 0 0;font-size:14px;color:#ffffff;">{date} · {slot}</p>
+                  </td></tr>
+                  <tr><td style="padding:16px 20px;">
+                    <p style="margin:0;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">Amount &amp; Check-in Code</p>
+                    <p style="margin:4px 0 0;font-size:14px;color:#ffffff;">₹{price} · Code <strong style="color:#E11D2E;letter-spacing:3px;">{code}</strong></p>
+                  </td></tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td align="center" style="border-top:1px solid #1f1f28;padding:20px 40px;">
+                <p style="margin:0;font-size:9px;letter-spacing:3px;color:#374151;text-transform:uppercase;">
+                  © 2026 BookMyConsole Gaming Hub. All rights reserved.
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+      </table>
+    </body>
+    </html>
+    """
+    return _send_email(recipient, subject, html_body)
+
+
+def send_booking_admin_notification_email(recipient: str, user_name: str, user_phone: str, cafe_name: str,
+                                           rig: str, zone: str, date: str, slot: str, price: int, code: str) -> bool:
+    """Sent to the cafe's owner_email right after a booking is created — tells them who's
+    coming in, and specifically which of their rigs/stations was just booked."""
+    # SECURITY: this email goes to a DIFFERENT party than whoever supplied these values
+    # (the booking gamer) — user_name/user_phone/rig in particular are fully
+    # client-controlled with no server-side allowlist, so escape everything before
+    # interpolating into HTML. Otherwise a crafted booking could inject markup (fake
+    # links, spoofed content) into an email a cafe owner receives under the platform's
+    # own verified sender identity.
+    user_name = html.escape(user_name or "")
+    user_phone = html.escape(user_phone or "")
+    cafe_name = html.escape(cafe_name or "")
+    rig = html.escape(rig) if rig else rig
+    zone = html.escape(zone or "")
+    date = html.escape(date or "")
+    slot = html.escape(slot or "")
+    code = html.escape(code or "")
+    subject = f"New Booking at {cafe_name} — {rig or zone}"
+
+    html_body = f"""
+    <html>
+    <body style="margin:0;padding:0;background-color:#0B0C10;font-family:'Courier New',monospace;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="background:#0B0C10;padding:50px 20px;">
+        <tr><td align="center">
+          <table width="520" cellpadding="0" cellspacing="0"
+                 style="background:#0E0E12;border:1px solid #E11D2E;border-radius:16px;overflow:hidden;">
+            <tr>
+              <td align="center" style="background:#0B0C10;padding:36px 0 24px;">
+                <p style="margin:0;font-size:11px;letter-spacing:6px;color:#E11D2E;text-transform:uppercase;">
+                  ⚡ BOOKMYCONSOLE GAMING HUB ⚡
+                </p>
+                <h1 style="margin:10px 0 0;font-size:26px;letter-spacing:3px;color:#ffffff;text-transform:uppercase;">
+                  NEW BOOKING
+                </h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px 40px;">
+                <p style="color:#9CA3AF;font-size:13px;margin:0 0 24px;letter-spacing:1px;">
+                  A gamer just booked a station at <strong style="color:#ffffff;">{cafe_name}</strong>.
+                </p>
+                <table width="100%" cellpadding="0" cellspacing="0" style="background:#0B0C10;border:1px solid #1f1f28;border-radius:12px;">
+                  <tr><td style="padding:16px 20px;border-bottom:1px solid #1f1f28;">
+                    <p style="margin:0;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">Station / Rig Booked</p>
+                    <p style="margin:4px 0 0;font-size:15px;color:#E11D2E;font-weight:bold;">{rig or "Auto-assigned"}</p>
+                  </td></tr>
+                  <tr><td style="padding:16px 20px;border-bottom:1px solid #1f1f28;">
+                    <p style="margin:0;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">Gamer</p>
+                    <p style="margin:4px 0 0;font-size:14px;color:#ffffff;">{user_name}{f" · {user_phone}" if user_phone else ""}</p>
+                  </td></tr>
+                  <tr><td style="padding:16px 20px;border-bottom:1px solid #1f1f28;">
+                    <p style="margin:0;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">Zone</p>
+                    <p style="margin:4px 0 0;font-size:14px;color:#ffffff;">{zone}</p>
+                  </td></tr>
+                  <tr><td style="padding:16px 20px;border-bottom:1px solid #1f1f28;">
+                    <p style="margin:0;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">Date &amp; Slot</p>
+                    <p style="margin:4px 0 0;font-size:14px;color:#ffffff;">{date} · {slot}</p>
+                  </td></tr>
+                  <tr><td style="padding:16px 20px;">
+                    <p style="margin:0;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">Amount &amp; Check-in Code</p>
+                    <p style="margin:4px 0 0;font-size:14px;color:#ffffff;">₹{price} · Code <strong style="color:#E11D2E;letter-spacing:3px;">{code}</strong></p>
+                  </td></tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td align="center" style="border-top:1px solid #1f1f28;padding:20px 40px;">
+                <p style="margin:0;font-size:9px;letter-spacing:3px;color:#374151;text-transform:uppercase;">
+                  © 2026 BookMyConsole Gaming Hub. All rights reserved.
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+      </table>
+    </body>
+    </html>
+    """
+    return _send_email(recipient, subject, html_body)
+
+
+def send_support_query_email(from_name: str, from_email: str, message: str, source: str = "App") -> bool:
+    """Forwards a user-submitted "Contact Support" query to SUPPORT_EMAIL, with
+    reply-to set to the submitter so support can just hit Reply. `source` distinguishes
+    the gamer app from the cafe-owner dashboard in the subject line."""
+    # SECURITY: from_name/message are fully user-controlled free text - escape before
+    # interpolating into HTML, same as the booking-confirmation emails.
+    safe_name = html.escape(from_name or "A user")
+    safe_email = html.escape(from_email or "")
+    safe_message = html.escape(message or "").replace("\n", "<br>")
+    subject = f"BookMyConsole Support Query ({source}) — {from_name or from_email or 'Unknown'}"
+
+    html_body = f"""
+    <html>
+    <body style="margin:0;padding:0;background-color:#0B0C10;font-family:'Courier New',monospace;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="background:#0B0C10;padding:50px 20px;">
+        <tr><td align="center">
+          <table width="520" cellpadding="0" cellspacing="0"
+                 style="background:#0E0E12;border:1px solid #E11D2E;border-radius:16px;overflow:hidden;">
+            <tr>
+              <td align="center" style="background:#0B0C10;padding:36px 0 24px;">
+                <p style="margin:0;font-size:11px;letter-spacing:6px;color:#E11D2E;text-transform:uppercase;">
+                  ⚡ BOOKMYCONSOLE GAMING HUB ⚡
+                </p>
+                <h1 style="margin:10px 0 0;font-size:26px;letter-spacing:3px;color:#ffffff;text-transform:uppercase;">
+                  SUPPORT QUERY
+                </h1>
+                <p style="margin:6px 0 0;font-size:10px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">
+                  via {html.escape(source)}
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px 40px;">
+                <table width="100%" cellpadding="0" cellspacing="0" style="background:#0B0C10;border:1px solid #1f1f28;border-radius:12px;margin-bottom:20px;">
+                  <tr><td style="padding:16px 20px;border-bottom:1px solid #1f1f28;">
+                    <p style="margin:0;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">From</p>
+                    <p style="margin:4px 0 0;font-size:15px;color:#ffffff;font-weight:bold;">{safe_name}</p>
+                  </td></tr>
+                  <tr><td style="padding:16px 20px;">
+                    <p style="margin:0;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">Email</p>
+                    <p style="margin:4px 0 0;font-size:14px;color:#E11D2E;">{safe_email}</p>
+                  </td></tr>
+                </table>
+                <p style="margin:0 0 8px;font-size:9px;letter-spacing:2px;color:#6B7280;text-transform:uppercase;">Message</p>
+                <p style="color:#e5e7eb;font-size:14px;line-height:1.7;margin:0;white-space:pre-wrap;">{safe_message}</p>
+              </td>
+            </tr>
+            <tr>
+              <td align="center" style="border-top:1px solid #1f1f28;padding:20px 40px;">
+                <p style="margin:0;font-size:9px;letter-spacing:3px;color:#374151;text-transform:uppercase;">
+                  Reply to this email to respond directly to {safe_email or "the sender"}.
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+      </table>
+    </body>
+    </html>
+    """
+    return _send_email(SUPPORT_EMAIL, subject, html_body, reply_to=from_email or None)
 
 
 def send_sms_otp(phone_number: str, otp: str) -> bool:
