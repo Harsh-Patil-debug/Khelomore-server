@@ -1196,13 +1196,15 @@ class SubscriptionPaymentsListView(APIView):
 
 
 class BookingDetailView(APIView):
-    """PUT /bookings/<id>/ — Update a booking (status, slot, date, rig)."""
+    """PUT /bookings/<id>/ — Update a booking. payment_status: cafe admin/super admin
+    only. status: admin/super admin may set anything; the booking's own user may only
+    self-cancel. See update_booking_handler for why slot/date/rig aren't updatable here."""
     def put(self, request, booking_id):
         email, error_response, is_privileged = authenticate_booking_access(request, booking_id)
         if error_response:
             return error_response
 
-        response = bookings.update_booking_handler(booking_id, request.data, allow_payment_status_change=is_privileged)
+        response = bookings.update_booking_handler(booking_id, request.data, is_privileged=is_privileged)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)

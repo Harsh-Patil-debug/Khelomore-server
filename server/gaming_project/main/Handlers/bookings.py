@@ -177,11 +177,20 @@ def create_booking_handler(data):
         return {"status": "error", "message": f"Failed to create booking: {e}"}
 
 
-def update_booking_handler(booking_id, data, allow_payment_status_change=False):
+def update_booking_handler(booking_id, data, is_privileged=False):
     """Updates status or other attributes of an existing booking.
 
-    payment_status may only be changed by a privileged caller (cafe admin/super admin) —
-    a booking's own user must never be able to self-mark their booking as paid.
+    SECURITY: payment_status may only be changed by a privileged caller (cafe admin/super
+    admin) — a booking's own user must never be able to self-mark their booking as paid.
+    status is more nuanced: a booking's own (non-privileged) user may self-cancel — that's
+    a legitimate, deliberately-supported feature — but may not self-set any OTHER status
+    ("Active"/"Completed"/etc.), which would bypass the cafe-owner-only SessionActionView
+    start/end flow and its actual_end_at/started_at bookkeeping. A privileged caller may
+    set status to anything, for manual corrections. slot/date/rig are deliberately NOT
+    updatable via this endpoint at all, by anyone — no real client (mobile app,
+    cafe-command-center, playhub-command) ever sends them here, and allowing them would
+    let a booking's own user rewrite it onto an already-booked slot/rig with none of the
+    conflict/atomicity checks that guard booking CREATION.
     """
     db_main = get_db()
     if db_main is None:
@@ -189,14 +198,9 @@ def update_booking_handler(booking_id, data, allow_payment_status_change=False):
     try:
         update_fields = {}
         if "status" in data:
-            update_fields["status"] = data["status"]
-        if "slot" in data:
-            update_fields["slot"] = data["slot"]
-        if "date" in data:
-            update_fields["date"] = data["date"]
-        if "rig" in data:
-            update_fields["rig"] = data["rig"]
-        if allow_payment_status_change:
+            if is_privileged or data["status"] == "Cancelled":
+                update_fields["status"] = data["status"]
+        if is_privileged:
             if "payment_status" in data:
                 update_fields["payment_status"] = data["payment_status"]
             if "paymentStatus" in data:

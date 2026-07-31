@@ -346,8 +346,16 @@ def update_rig_handler(rig_id, data):
             if price_error:
                 return {"status": "error", "message": price_error}
             update_fields["hourly_price"] = price
+        # SECURITY: cafe_id is deliberately NOT updatable here. The caller is authorized
+        # against the rig's CURRENT cafe_id only (RigDetailView._authenticate_for_rig
+        # checks ownership of the rig as it exists now, before this update runs) — if this
+        # field were writable, a cafe owner could reassign their own rig into a DIFFERENT
+        # cafe's tenant scope they were never authorized against, polluting that cafe's
+        # rig list, Live Floor, and booking-capacity math. A rig's cafe is fixed at
+        # creation (rigs.create_rig_handler), matching how offers/cafes already refuse to
+        # let ownership be reassigned via their own update handlers.
         if "cafeId" in data or "cafe_id" in data:
-            update_fields["cafe_id"] = data.get("cafeId") or data.get("cafe_id")
+            return {"status": "error", "message": "A rig's cafe cannot be changed after creation."}
 
         if not update_fields:
             return {"status": "error", "message": "No valid fields to update were provided."}
