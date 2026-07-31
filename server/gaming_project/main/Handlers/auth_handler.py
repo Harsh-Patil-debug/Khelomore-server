@@ -899,3 +899,32 @@ def bookmyconsole_upload_avatar(email, uploaded_file, is_admin=False, role=""):
     coll.update_one({"_id": user["_id"]}, {"$set": {"avatar_url": avatar_url}})
 
     return {"status": "success", "avatar_url": avatar_url}, 200
+
+
+def bookmyconsole_delete_account(email, is_admin=False, role=""):
+    """Permanently deletes a user's account and personal data — required by Google Play
+    for any app that supports account creation (there was previously no way for a user
+    to do this at all). The account document itself is hard-deleted. Bookings and
+    tournament registrations are anonymized rather than hard-deleted: a cafe owner's own
+    revenue/attendance records shouldn't disappear because a customer deleted their
+    account, but the deleted user's personal identifiers (name, phone, email, gamer IDs)
+    must not remain attached to them."""
+    coll = get_user_collection(is_admin, role)
+    user = coll.find_one({"email": email})
+    if not user:
+        return {"error": "User not found."}, 404
+
+    anon_email = f"deleted-{user['_id']}@bookmyconsole.deleted"
+
+    db_main.bookings.update_many(
+        {"user_email": email},
+        {"$set": {"user_name": "Deleted User", "user_phone": "", "user_email": anon_email}},
+    )
+    db_main.registrations.update_many(
+        {"user_email": email},
+        {"$set": {"user_email": anon_email, "gamer_ids": []}},
+    )
+    db_main.push_tokens.delete_one({"user_email": email})
+    coll.delete_one({"_id": user["_id"]})
+
+    return {"status": "success", "message": "Account and personal data deleted."}, 200

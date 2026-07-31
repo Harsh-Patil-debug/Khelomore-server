@@ -599,6 +599,27 @@ class BookMyConsoleUploadAvatarView(APIView):
         return Response(result, status=status_code)
 
 
+class BookMyConsoleDeleteAccountView(APIView):
+    """
+    POST /auth/delete-account/
+    Header: Authorization: Bearer <token>
+    Permanently deletes the authenticated user's account and personal data. Required by
+    Google Play policy for any app that supports account creation.
+    Returns: { status, message }
+    """
+    def post(self, request):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+
+        result, status_code = auth_handler.bookmyconsole_delete_account(
+            email    = email,
+            is_admin = check_is_admin(request),
+            role     = request.data.get("role", ""),
+        )
+        return Response(result, status=status_code)
+
+
 from .Handlers import bookings_handler
 
 class BookedSlotsView(APIView):

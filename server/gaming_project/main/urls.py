@@ -84,6 +84,7 @@ urlpatterns = [
     path('auth/update-phone/', BookMyConsoleUpdatePhoneView.as_view(), name='auth_update_phone'),
     path('auth/update-profile/', BookMyConsoleUpdateProfileView.as_view(), name='auth_update_profile'),
     path('auth/upload-avatar/', BookMyConsoleUploadAvatarView.as_view(), name='auth_upload_avatar'),
+    path('auth/delete-account/', BookMyConsoleDeleteAccountView.as_view(), name='auth_delete_account'),
     path('auth/logout/',     BookMyConsoleLogoutView.as_view(),    name='auth_logout'),
     path('auth/me/',         BookMyConsoleMeView.as_view(),        name='auth_me'),
 
