@@ -107,6 +107,11 @@ def send_broadcast_notification_handler(title: str, body: str, audience: str, se
             "created_at": datetime.now(IST),
         }
         result = db_main.notifications.insert_one(record)
+        # insert_one mutates `record` in place, adding a raw ObjectId `_id` key - drop
+        # it (mirroring list_broadcasts_handler's .pop("_id")) since ObjectId isn't
+        # JSON-serializable and would otherwise crash DRF's response rendering with an
+        # unhandled 500 even though this function itself returns successfully.
+        record.pop("_id", None)
         record["id"] = str(result.inserted_id)
         record["created_at"] = record["created_at"].isoformat()
 
