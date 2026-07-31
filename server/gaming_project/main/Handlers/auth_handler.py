@@ -925,6 +925,7 @@ def bookmyconsole_delete_account(email, is_admin=False, role=""):
         {"$set": {"user_email": anon_email, "gamer_ids": []}},
     )
     db_main.push_tokens.delete_one({"user_email": email})
+    db_main.favorites.delete_many({"user_email": email})
     coll.delete_one({"_id": user["_id"]})
 
     return {"status": "success", "message": "Account and personal data deleted."}, 200
