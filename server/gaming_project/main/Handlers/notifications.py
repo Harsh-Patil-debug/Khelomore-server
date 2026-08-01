@@ -124,6 +124,70 @@ def send_broadcast_notification_handler(title: str, body: str, audience: str, se
         return {"status": "error", "message": f"Failed to send broadcast: {e}"}, 500
 
 
+# A booking whose actual_end_at is older than this is treated as stale rather than
+# notified - guards the very first tick after deploy (or after any downtime) against
+# scanning years of pre-existing bookings that never had end_notification_sent set and
+# blasting real users with "Session ended" pushes about long-over sessions.
+STALE_END_NOTIFICATION_CUTOFF_MINUTES = 15
+
+
+def send_due_session_end_notifications() -> int:
+    """Scans for bookings whose session has actually finished (actual_end_at has passed)
+    and pushes a one-time 'Session ended' notification to that specific booking's user.
+
+    Keyed off actual_end_at rather than the booking's status field, since completion is
+    admin-only (see sessions.py's list_sessions_handler docstring) - a booking can sit
+    well past its actual_end_at with status still 'Active' if the admin hasn't hit "End
+    Session" yet, and the customer should still be told their time is up. Also covers a
+    session an admin ended early, since end_session_handler sets actual_end_at to the
+    real end moment.
+
+    Idempotent via the persisted end_notification_sent flag (set regardless of whether a
+    push token existed, so a user who never registered one doesn't get rescanned
+    forever), so it's safe to call this on every scheduler tick."""
+    try:
+        now = datetime.now(IST)
+        candidates = db_main.bookings.find({
+            "actual_end_at": {"$exists": True, "$ne": None},
+            "end_notification_sent": {"$ne": True},
+        })
+
+        sent = 0
+        for booking in candidates:
+            raw_end = booking.get("actual_end_at")
+            try:
+                end_dt = datetime.fromisoformat(raw_end)
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=IST)
+            except (TypeError, ValueError):
+                db_main.bookings.update_one({"_id": booking["_id"]}, {"$set": {"end_notification_sent": True}})
+                continue
+
+            if end_dt > now:
+                continue  # not due yet - leave unflagged for a later tick
+
+            is_stale = (now - end_dt) > timedelta(minutes=STALE_END_NOTIFICATION_CUTOFF_MINUTES)
+            if not is_stale:
+                user_email = booking.get("user_email")
+                token_doc = db_main.push_tokens.find_one({"user_email": user_email}) if user_email else None
+                if token_doc and token_doc.get("expo_push_token"):
+                    rig = (booking.get("rig") or "").split("·")[0].strip()
+                    station = f" on {rig}" if rig else ""
+                    accepted = _send_expo_push_batch(
+                        [token_doc["expo_push_token"]],
+                        "Session ended",
+                        f"Your booking{station} has ended. Thanks for playing!",
+                    )
+                    sent += accepted
+
+            db_main.bookings.update_one({"_id": booking["_id"]}, {"$set": {"end_notification_sent": True}})
+
+        return sent
+    except Exception as e:
+        print(f"[PUSH] send_due_session_end_notifications failed: {e}")
+        return 0
+
+
 def list_broadcasts_handler(limit: int = 50):
     """Recent broadcast history for the super-admin panel's 'Recent broadcasts' list."""
     try:

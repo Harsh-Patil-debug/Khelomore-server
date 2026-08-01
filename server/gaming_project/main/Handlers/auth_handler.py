@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import jwt
 import json
 import uuid
@@ -827,6 +828,18 @@ def bookmyconsole_update_profile(email, updates: dict, is_admin=False, role=""):
     }, 200
 
 
+def _cloudinary_public_id_from_url(url: str):
+    """Best-effort fallback for avatars uploaded before avatar_cloudinary_id was tracked
+    explicitly: derives the public_id Cloudinary needs for uploader.destroy() straight
+    back out of a secure_url like
+    https://res.cloudinary.com/<cloud>/image/upload/v<version>/bookmyconsole/avatars/<id>.jpg
+    -> "bookmyconsole/avatars/<id>". Returns None if the URL doesn't look like one of ours."""
+    if not url:
+        return None
+    match = re.search(r"/upload/(?:v\d+/)?(.+?)\.[a-zA-Z0-9]+(?:\?.*)?$", url)
+    return match.group(1) if match else None
+
+
 def bookmyconsole_upload_avatar(email, uploaded_file, is_admin=False, role=""):
     """Uploads a user's profile picture to Cloudinary and stores the resulting secure_url
     on their account. Mirrors the same validate-then-upload pattern used for cafe images
@@ -846,13 +859,27 @@ def bookmyconsole_upload_avatar(email, uploaded_file, is_admin=False, role=""):
     try:
         upload_result = cloudinary.uploader.upload(uploaded_file, folder="bookmyconsole/avatars")
         avatar_url = upload_result.get("secure_url")
+        new_public_id = upload_result.get("public_id")
     except Exception as e:
         return {"error": f"Image upload failed: {e}"}, 500
 
     if not avatar_url:
         return {"error": "Image upload failed."}, 500
 
-    coll.update_one({"_id": user["_id"]}, {"$set": {"avatar_url": avatar_url}})
+    # Replacing an existing uploaded photo would otherwise orphan the old file in
+    # Cloudinary forever (only the DB reference gets overwritten) - best-effort cleanup,
+    # not worth failing the new upload over if the old asset is already gone/unreachable.
+    old_public_id = user.get("avatar_cloudinary_id") or _cloudinary_public_id_from_url(user.get("avatar_url"))
+    if old_public_id and old_public_id != new_public_id:
+        try:
+            cloudinary.uploader.destroy(old_public_id)
+        except Exception:
+            pass
+
+    coll.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"avatar_url": avatar_url, "avatar_cloudinary_id": new_public_id}},
+    )
 
     return {"status": "success", "avatar_url": avatar_url}, 200
 
@@ -864,11 +891,22 @@ def bookmyconsole_delete_account(email, is_admin=False, role=""):
     tournament registrations are anonymized rather than hard-deleted: a cafe owner's own
     revenue/attendance records shouldn't disappear because a customer deleted their
     account, but the deleted user's personal identifiers (name, phone, email, gamer IDs)
-    must not remain attached to them."""
+    must not remain attached to them. An uploaded avatar photo is real personal data too -
+    deleting only the DB's avatar_url reference would leave the actual image file sitting
+    on Cloudinary indefinitely, so it's explicitly destroyed there as well."""
     coll = get_user_collection(is_admin, role)
     user = coll.find_one({"email": email})
     if not user:
         return {"error": "User not found."}, 404
+
+    avatar_public_id = user.get("avatar_cloudinary_id") or _cloudinary_public_id_from_url(user.get("avatar_url"))
+    if avatar_public_id:
+        try:
+            cloudinary.uploader.destroy(avatar_public_id)
+        except Exception as e:
+            # Best-effort - a Cloudinary hiccup shouldn't block the account deletion
+            # itself, which is the part with a hard compliance deadline.
+            print(f"[DeleteAccount] Failed to destroy Cloudinary avatar {avatar_public_id!r}: {e}")
 
     anon_email = f"deleted-{user['_id']}@bookmyconsole.deleted"
 

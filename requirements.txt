@@ -66,3 +66,9 @@ python-dotenv==1.0.1
 # Not imported by gaming_project.main itself — used only by create_test_cafe.py (a
 # standalone script in server/) to auto-geocode an address into lat/lon.
 geopy==2.4.1
+
+# ── Background jobs ────────────────────────────
+# In-process scheduler for the session-end push notification tick (Handlers/scheduler.py).
+# render.yaml runs a single gunicorn worker (no -w flag), so one in-process thread is
+# enough - no Celery/Redis broker needed for a single periodic per-minute check.
+APScheduler==3.10.4

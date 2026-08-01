@@ -1,7 +1,28 @@
 # favorites.py
 # Handlers for managing user favorite cafes in a dedicated MongoDB collection
 
+import pymongo
 from .db_connection import db_main
+
+_favorites_index_ensured = False
+
+
+def _ensure_favorites_index():
+    # Lazy + idempotent, mirroring payments.py's _ensure_used_payments_index - the
+    # previous find-then-insert toggle was a check-then-act race: two near-simultaneous
+    # toggle requests for the same cafe (a rapid double-tap firing two overlapping
+    # requests before the first one's optimistic UI disabled the button) could both see
+    # "not favorited yet" and both insert, leaving a duplicate row for the same
+    # user+cafe. A unique index makes that structurally impossible instead of relying on
+    # request timing.
+    global _favorites_index_ensured
+    if not _favorites_index_ensured:
+        try:
+            db_main.favorites.create_index([("user_email", 1), ("cafe_id", 1)], unique=True)
+        except Exception:
+            pass
+        _favorites_index_ensured = True
+
 
 def get_favorites_handler(user_email: str):
     """
@@ -38,26 +59,31 @@ def toggle_favorite_handler(user_email: str, cafe_id: str):
         return {"status": "error", "message": "Cafe ID is required"}, 400
 
     try:
+        _ensure_favorites_index()
         user_email = user_email.strip().lower()
         cafe_id = cafe_id.strip()
 
-        # Check if the record already exists in the dedicated 'favorites' collection
-        existing = db_main.favorites.find_one({
+        # Atomic delete-if-exists first: find_one_and_delete can't race with itself the
+        # way a separate find_one + delete_one could. If nothing was there to delete,
+        # fall through to inserting - the unique index (user_email, cafe_id) makes a
+        # concurrent duplicate insert impossible, and a losing concurrent request is
+        # treated as "already added" rather than an error.
+        deleted = db_main.favorites.find_one_and_delete({
             "user_email": user_email,
             "cafe_id": cafe_id
         })
 
-        if existing:
-            # Remove the favorite document
-            db_main.favorites.delete_one({"_id": existing["_id"]})
-            action = "removed"
+        if deleted:
+            action = "removed from"
         else:
-            # Insert a new favorite document
-            db_main.favorites.insert_one({
-                "user_email": user_email,
-                "cafe_id": cafe_id
-            })
-            action = "added"
+            try:
+                db_main.favorites.insert_one({
+                    "user_email": user_email,
+                    "cafe_id": cafe_id
+                })
+            except pymongo.errors.DuplicateKeyError:
+                pass  # a concurrent request already added it - same end state
+            action = "added to"
 
         # Fetch the updated list of favorite cafe IDs
         fav_docs = db_main.favorites.find({"user_email": user_email})
@@ -65,7 +91,7 @@ def toggle_favorite_handler(user_email: str, cafe_id: str):
 
         return {
             "status": "success",
-            "message": f"Cafe successfully {action} to favorites",
+            "message": f"Cafe successfully {action} favorites",
             "favorites": updated_favorites
         }, 200
     except Exception as e:
