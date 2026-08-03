@@ -14,9 +14,14 @@ def authenticate_request(request):
     if auth_header and auth_header.startswith('Bearer '):
         token = auth_header.split(' ')[1].strip()
     else:
-        # Fallback to HttpOnly cookie for web users / admins
+        # Fallback to HttpOnly cookie for web users / admins.
+        # BUG: this never checked bmc_super_admin_token, so a super admin session relying
+        # purely on its cookie (no Authorization: Bearer fallback active) would 401 here
+        # with "token missing" even though a valid cookie was actually sent - before ever
+        # reaching BookMyConsoleMeView's own (separately fixed) role-lookup logic.
         token = (
-            request.COOKIES.get('bmc_admin_token')
+            request.COOKIES.get('bmc_super_admin_token')
+            or request.COOKIES.get('bmc_admin_token')
             or request.COOKIES.get('bmc_website_token')
             or request.COOKIES.get('bmc_gamer_token')
         )

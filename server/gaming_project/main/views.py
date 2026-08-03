@@ -1641,14 +1641,31 @@ class BookMyConsoleMeView(APIView):
         # account the frontend making the request means; only fall back to guessing a
         # fixed order when authenticating via a bare Authorization header, which carries
         # no such hint.
-        if request.COOKIES.get('bmc_admin_token'):
+        # BUG: this used to have no branch for bmc_super_admin_token at all, so a super
+        # admin's session (whose email often ALSO exists as a regular admin/gamer/website
+        # account, since the same person tests every role) could silently resolve to the
+        # wrong collection here - /auth/me/ returning the wrong "who am I" right as a
+        # session was expiring/renewing is exactly what produced the reported "signs out
+        # and logs back into the dashboard at the same time" confusion in the super admin
+        # panel: the frontend's logged-in check and its logged-out check could each land
+        # on a different answer depending on which collection this fell through to.
+        if request.COOKIES.get('bmc_super_admin_token'):
+            lookup_order = [(db_main.super_admin, "super_admin"), (db_main.admins, "admin"), (db_main.website_users, "website_user"), (db_main.users, "user")]
+        elif request.COOKIES.get('bmc_admin_token'):
             lookup_order = [(db_main.admins, "admin"), (db_main.website_users, "website_user"), (db_main.users, "user")]
         elif request.COOKIES.get('bmc_website_token'):
             lookup_order = [(db_main.website_users, "website_user"), (db_main.users, "user"), (db_main.admins, "admin")]
         elif request.COOKIES.get('bmc_gamer_token'):
             lookup_order = [(db_main.users, "user"), (db_main.website_users, "website_user"), (db_main.admins, "admin")]
         else:
-            lookup_order = [(db_main.website_users, "website_user"), (db_main.users, "user"), (db_main.admins, "admin")]
+            # No recognizable auth cookie arrived at all - the common case for
+            # cross-origin/ngrok dev setups where third-party cookies get blocked and only
+            # the Authorization: Bearer fallback (see api-client.ts) actually carries the
+            # session, which this endpoint can't otherwise tell a role from. Check
+            # super_admin first: a collision with a customer/website account under the
+            # same email is far less likely than the reverse, and guessing wrong here for
+            # an actual super admin is the more damaging failure mode of the two.
+            lookup_order = [(db_main.super_admin, "super_admin"), (db_main.website_users, "website_user"), (db_main.users, "user"), (db_main.admins, "admin")]
 
         user = None
         role = None
