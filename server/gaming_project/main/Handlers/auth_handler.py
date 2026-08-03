@@ -77,6 +77,86 @@ SUPER_ADMIN_OTP_EXPIRY_MINUTES = int(os.getenv("SUPER_ADMIN_OTP_EXPIRY_MINUTES",
 OTP_EXPIRY_MINUTES = int(os.getenv("OTP_EXPIRY_MINUTES", "10"))
 
 
+def _parse_slot_time_on_date(date_str: str, time_str: str):
+    match = re.match(r'^(\d+):(\d+)\s*(AM|PM)$', time_str.strip(), re.IGNORECASE)
+    if not match:
+        return None
+    hours = int(match.group(1))
+    minutes = int(match.group(2))
+    ampm = match.group(3).upper()
+    if ampm == 'PM' and hours < 12:
+        hours += 12
+    if ampm == 'AM' and hours == 12:
+        hours = 0
+    try:
+        base_date = datetime.strptime(date_str, '%Y-%m-%d')
+    except (ValueError, TypeError):
+        return None
+    return base_date.replace(hour=hours, minute=minutes, second=0, microsecond=0, tzinfo=IST)
+
+
+def _compute_booking_playtime_hours(booking: dict) -> float:
+    """Real hours played for one booking - mirrors the mobile app's own
+    computeBookingPlaytimeHours (booking-store.ts) so the profile stat and the app's
+    own session math never disagree. Prefers the actual admin-recorded start/end time
+    (accounts for extensions/an early end accurately); falls back to the scheduled slot
+    duration only for a Completed booking missing that data (predates the admin
+    start/end system); 0 for anything not Active/Completed - a Reserved-but-never-
+    started or Upcoming booking hasn't actually been played."""
+    booking_status = booking.get("status")
+    if booking_status not in ("Active", "Completed"):
+        return 0.0
+
+    def _parse_iso(raw):
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw)
+            return dt.replace(tzinfo=IST) if dt.tzinfo is None else dt
+        except (ValueError, TypeError):
+            return None
+
+    started_at = _parse_iso(booking.get("started_at"))
+    ended_at = datetime.now(IST) if booking_status == "Active" else _parse_iso(booking.get("actual_end_at"))
+
+    if started_at and ended_at and ended_at > started_at:
+        return (ended_at - started_at).total_seconds() / 3600
+
+    if booking_status != "Completed":
+        return 0.0
+
+    date_str = booking.get("date", "")
+    total_seconds = 0.0
+    for slot_str in booking.get("slots", []):
+        parts = slot_str.split("-")
+        if len(parts) != 2:
+            continue
+        start = _parse_slot_time_on_date(date_str, parts[0].strip())
+        end = _parse_slot_time_on_date(date_str, parts[1].strip())
+        if not start or not end:
+            continue
+        if end <= start:
+            end += timedelta(days=1)
+        total_seconds += (end - start).total_seconds()
+    return total_seconds / 3600
+
+
+def compute_total_playtime_hours(user_email: str) -> float:
+    """Real, server-computed lifetime playtime for a gamer - replaces what used to be a
+    hardcoded 140 returned for every single user regardless of their actual booking
+    history (the 'total_playtime' field never existed on the user document at all)."""
+    try:
+        total = 0.0
+        for booking in db_main.bookings.find(
+            {"user_email": user_email, "status": {"$in": ["Active", "Completed"]}},
+            {"status": 1, "started_at": 1, "actual_end_at": 1, "slots": 1, "date": 1},
+        ):
+            total += _compute_booking_playtime_hours(booking)
+        return round(total, 1)
+    except Exception:
+        return 0.0
+
+
 def get_otp_expiry_minutes(role: str = "") -> int:
     return SUPER_ADMIN_OTP_EXPIRY_MINUTES if role == "super_admin" else OTP_EXPIRY_MINUTES
 MAX_LOGIN_ATTEMPTS = int(os.getenv("MAX_LOGIN_ATTEMPTS", "5"))
@@ -468,7 +548,7 @@ def bookmyconsole_verify_otp(email, otp_code, iv, is_admin=False, role=""):
             "rank":           user.get("rank", "Recruit PRO I"),
             "xp":             user.get("xp", 0),
             "auth_provider":  user.get("auth_provider", "traditional"),
-            "total_playtime": user.get("total_playtime", 140),
+            "total_playtime": compute_total_playtime_hours(dec_email),
             "role":           user.get("role", role if role else ("admin" if is_admin else "user")),
             "phone":          decrypt_phone_field(user.get("phone", "")),
         }
@@ -701,7 +781,7 @@ def bookmyconsole_google_auth_code_verify(code: str, is_admin=False, role=""):
                 "rank":           user.get("rank", "Recruit PRO I"),
                 "xp":             user.get("xp", 0),
                 "auth_provider":  user.get("auth_provider", "google"),
-                "total_playtime": user.get("total_playtime", 140),
+                "total_playtime": compute_total_playtime_hours(email),
                 "role":           user.get("role", "admin" if is_admin else "user"),
                 "phone":          decrypt_phone_field(user.get("phone", "")),
             }
@@ -758,7 +838,7 @@ def bookmyconsole_update_phone(email, phone_encrypted, iv, is_admin=False, role=
             "rank":           updated_user.get("rank", "Recruit PRO I"),
             "xp":             updated_user.get("xp", 0),
             "auth_provider":  updated_user.get("auth_provider", "google"),
-            "total_playtime": updated_user.get("total_playtime", 140),
+            "total_playtime": compute_total_playtime_hours(updated_user.get("email")),
             "role":           updated_user.get("role", "user"),
             "phone":          decrypt_phone_field(updated_user.get("phone", "")),
         }
