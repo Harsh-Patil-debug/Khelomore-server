@@ -25,6 +25,7 @@ class AdminSignupRazorpayPasswordTests(SecurityTestCase):
             "password": enc_parts[2],
             "iv": iv,
             "role": role,
+            "terms_accepted": True,
         }
         idx = 3
         if phone:

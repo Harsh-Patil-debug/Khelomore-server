@@ -141,6 +141,20 @@ def check_is_admin(request):
     return False
 
 
+def _parse_bool_flag(value):
+    """
+    Accepts either a native JSON boolean (website, DRF-parsed) or the string "true"/"false"
+    (mobile app, whose apiPost only sends Record<string, string> bodies) — bool("false")
+    is truthy in Python, so a plain bool() cast would silently treat an unchecked box
+    as accepted.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
+
+
 def reject_unauthorized_super_admin_role(request, role):
     """
     SECURITY: role is a client-supplied field on public register/login/verify-otp/resend-otp
@@ -184,6 +198,11 @@ class BookMyConsoleRegisterView(APIView):
             is_admin          = check_is_admin(request),
             role              = role,
             razorpay_password = data.get("razorpay_password", ""),
+            # Website sends a native JSON boolean; the mobile app's apiPost only accepts
+            # Record<string, string> bodies and sends the string "true"/"false" instead —
+            # `bool("false")` is truthy in Python, so a plain bool() cast here would silently
+            # treat an unchecked box as accepted.
+            terms_accepted    = _parse_bool_flag(data.get("terms_accepted", False)),
         )
         return Response(result, status=status_code)
 
@@ -433,6 +452,17 @@ class BookMyConsoleGoogleLoginView(APIView):
             return_url = request.query_params.get('return_url', settings.FRONTEND_URL)
             if not _is_allowed_oauth_redirect_target(return_url):
                 return Response({"error": "Unauthorized redirect target."}, status=status.HTTP_400_BAD_REQUEST)
+            # Google's `state` param round-trips unchanged to the callback — it's the only
+            # channel available to carry whether the user checked the consent box, since the
+            # callback only ever receives `code` and `state` back from Google. Must be
+            # percent-encoded: an unescaped `&` here would be parsed by Google as a second
+            # top-level query param instead of part of state's value, and wouldn't come back.
+            terms_accepted = request.query_params.get('terms_accepted', '') in ('1', 'true', 'True')
+            state_target = return_url
+            if terms_accepted:
+                separator = '&' if '?' in return_url else '?'
+                state_target = f"{return_url}{separator}terms_accepted=1"
+            from urllib.parse import quote
             auth_url = (
                 "https://accounts.google.com/o/oauth2/v2/auth"
                 f"?client_id={settings.GOOGLE_CLIENT_ID}"
@@ -441,7 +471,7 @@ class BookMyConsoleGoogleLoginView(APIView):
                 "&scope=openid%20email%20profile"
                 "&access_type=offline"
                 "&prompt=select_account"
-                f"&state={return_url}"
+                f"&state={quote(state_target, safe='')}"
             )
             return redirect(auth_url)
         except Exception as e:
@@ -461,7 +491,9 @@ class BookMyConsoleGoogleCallbackView(APIView):
                 return Response({"error": "Auth code not provided"}, status=status.HTTP_400_BAD_REQUEST)
             is_mobile = state.startswith('bookmyconsole://') or state.startswith('exp://')
             role = "user" if is_mobile else "website_user"
-            response, status_code = auth_handler.bookmyconsole_google_auth_code_verify(code, role=role)
+            from urllib.parse import urlparse, parse_qs
+            state_terms_accepted = parse_qs(urlparse(state).query).get('terms_accepted', ['0'])[0] in ('1', 'true', 'True')
+            response, status_code = auth_handler.bookmyconsole_google_auth_code_verify(code, role=role, terms_accepted=state_terms_accepted)
             
             if status_code == 200:
                 # SECURITY: Only allow redirects to our own app schemes / our own frontend origin —

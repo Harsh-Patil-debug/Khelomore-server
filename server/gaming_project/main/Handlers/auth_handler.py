@@ -344,7 +344,7 @@ def get_user_collection(is_admin=False, role=""):
         return db_main.admins
     return db_main.admins if is_admin else db_main.users
 
-def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=False, role="", razorpay_password=None):
+def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=False, role="", razorpay_password=None, terms_accepted=False):
     """Signup Step 1 - creates pending user, sends OTP, NO JWT yet."""
     try:
         dec_gamertag = decrypt_data(gamertag, iv).strip()
@@ -371,6 +371,13 @@ def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=F
     )
     if error:
         return {"error": error}, 400
+    # SECURITY: the checkbox gating this on the gamer/website-user signup forms is
+    # client-side only and therefore bypassable by anyone calling this endpoint
+    # directly — enforce consent here too. Scoped to gamer + website_user roles only:
+    # cafe-owner (admin) accounts are provisioned through a separate onboarding flow
+    # on a different frontend that doesn't collect this consent yet.
+    if role in ("", "user", "website_user") and not terms_accepted:
+        return {"error": "You must accept the Terms & Conditions, Privacy Policy and Cancellation & Refund Policy to register."}, 400
     if is_cafe_owner_signup:
         if not dec_razorpay_password:
             return {"error": "A Razorpay password is required to protect your payment settings."}, 400
@@ -406,6 +413,10 @@ def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=F
         "createdAt":     datetime.now(IST),
         "role":          role if role else ("admin" if is_admin else "user"),
     }
+    if role in ("", "user", "website_user"):
+        new_user_doc["termsAccepted"] = True
+        new_user_doc["privacyAccepted"] = True
+        new_user_doc["cancellationPolicyAccepted"] = True
     if is_cafe_owner_signup:
         new_user_doc["razorpay_password_hash"] = ph.hash(dec_razorpay_password)
 
@@ -688,7 +699,7 @@ def bookmyconsole_reset_password(email, otp_code, new_password, iv, is_admin=Fal
     return {"encrypted_response": enc_resp, "iv": iv2}, 200
 
 
-def bookmyconsole_google_auth_code_verify(code: str, is_admin=False, role=""):
+def bookmyconsole_google_auth_code_verify(code: str, is_admin=False, role="", terms_accepted=False):
     """
     Exchanges Google Auth Code for ID Token, verifies it, and returns a BookMyConsole session.
     """
@@ -746,7 +757,13 @@ def bookmyconsole_google_auth_code_verify(code: str, is_admin=False, role=""):
 
         is_new = not user
         if is_new:
-            result = coll.insert_one({
+            # SECURITY: mirrors the same consent gate enforced in bookmyconsole_register —
+            # the client disables the "Continue with Google" button until the box is
+            # checked, but that's bypassable by hitting this endpoint directly. Existing
+            # users signing back in are never affected since this only runs on creation.
+            if role in ("", "user", "website_user") and not terms_accepted:
+                return {"error": "You must accept the Terms & Conditions, Privacy Policy and Cancellation & Refund Policy to create an account."}, 400
+            new_google_user_doc = {
                 "gamertag":      derived_gamertag,
                 "full_name":     full_name,
                 "email":         email,
@@ -756,7 +773,12 @@ def bookmyconsole_google_auth_code_verify(code: str, is_admin=False, role=""):
                 "rank":          "Recruit PRO I",
                 "createdAt":     datetime.now(IST),
                 "role":          role if role else ("admin" if is_admin else "user"),
-            })
+            }
+            if role in ("", "user", "website_user"):
+                new_google_user_doc["termsAccepted"] = True
+                new_google_user_doc["privacyAccepted"] = True
+                new_google_user_doc["cancellationPolicyAccepted"] = True
+            result = coll.insert_one(new_google_user_doc)
             user = coll.find_one({"_id": result.inserted_id})
             try:
                 send_welcome_email(email, derived_gamertag)

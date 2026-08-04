@@ -67,7 +67,7 @@ class RegisterValidationTests(SecurityTestCase):
         iv = encrypted[-1]
         enc_gamertag, enc_email, enc_password = encrypted[0], encrypted[1], encrypted[2]
         enc_phone = encrypted[3] if phone else None
-        return auth_handler.bookmyconsole_register(enc_gamertag, enc_email, enc_password, iv, phone=enc_phone, role="user")
+        return auth_handler.bookmyconsole_register(enc_gamertag, enc_email, enc_password, iv, phone=enc_phone, role="user", terms_accepted=True)
 
     def test_weak_password_rejected_even_though_client_would_have_allowed_it_pre_fix(self):
         result, code = self._register(password="short1")
@@ -82,6 +82,47 @@ class RegisterValidationTests(SecurityTestCase):
     def test_valid_registration_succeeds(self):
         result, code = self._register(password="LongEnough1")
         self.assertEqual(code, 200)
+
+    def test_registration_without_terms_accepted_is_rejected(self):
+        # terms_accepted defaults to False in the handler signature — a direct call
+        # (bypassing the client checkbox entirely) must still be rejected server-side.
+        email = self.unique_email("noconsent")
+        encrypted = self.encrypt_with_shared_iv("Player", email, "LongEnough1")
+        iv = encrypted[-1]
+        result, code = auth_handler.bookmyconsole_register(
+            encrypted[0], encrypted[1], encrypted[2], iv, role="user",
+        )
+        self.assertEqual(code, 400)
+        self.assertIn("Terms", result["error"])
+        self.assertIsNone(self.db.users.find_one({"email": email}))
+
+    def test_registration_stores_consent_flags_for_gamer(self):
+        email = self.unique_email("gamerconsent")
+        encrypted = self.encrypt_with_shared_iv("Player", email, "LongEnough1")
+        iv = encrypted[-1]
+        result, code = auth_handler.bookmyconsole_register(
+            encrypted[0], encrypted[1], encrypted[2], iv, role="user", terms_accepted=True,
+        )
+        self.assertEqual(code, 200, result)
+        user_doc = self.db.users.find_one({"email": email})
+        self.track("users", user_doc["_id"])
+        self.assertTrue(user_doc["termsAccepted"])
+        self.assertTrue(user_doc["privacyAccepted"])
+        self.assertTrue(user_doc["cancellationPolicyAccepted"])
+
+    def test_registration_stores_consent_flags_for_website_user(self):
+        email = self.unique_email("webuserconsent")
+        encrypted = self.encrypt_with_shared_iv("Player", email, "LongEnough1")
+        iv = encrypted[-1]
+        result, code = auth_handler.bookmyconsole_register(
+            encrypted[0], encrypted[1], encrypted[2], iv, role="website_user", terms_accepted=True,
+        )
+        self.assertEqual(code, 200, result)
+        user_doc = self.db.website_users.find_one({"email": email})
+        self.track("website_users", user_doc["_id"])
+        self.assertTrue(user_doc["termsAccepted"])
+        self.assertTrue(user_doc["privacyAccepted"])
+        self.assertTrue(user_doc["cancellationPolicyAccepted"])
 
 
 class CafeValidationTests(SecurityTestCase):
