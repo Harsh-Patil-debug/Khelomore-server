@@ -124,6 +124,46 @@ class RegisterValidationTests(SecurityTestCase):
         self.assertTrue(user_doc["privacyAccepted"])
         self.assertTrue(user_doc["cancellationPolicyAccepted"])
 
+    def test_registration_with_unrecognized_role_still_requires_consent(self):
+        # Regression test for a real bypass found in review: get_user_collection()'s
+        # fallback routes ANY role value it doesn't recognize straight to db_main.users
+        # (the real gamer collection), same as role="" or role="user". An earlier version
+        # of this consent check used an allowlist of ("", "user", "website_user") instead
+        # of a denylist of the actually-exempt roles (admin/super_admin) — so a request
+        # with an unrecognized role like this one would silently skip the consent
+        # requirement entirely while still creating a real account in db_main.users.
+        email = self.unique_email("unrecognizedrole")
+        encrypted = self.encrypt_with_shared_iv("Player", email, "LongEnough1")
+        iv = encrypted[-1]
+        result, code = auth_handler.bookmyconsole_register(
+            encrypted[0], encrypted[1], encrypted[2], iv, role="totally-not-a-real-role",
+        )
+        self.assertEqual(code, 400)
+        self.assertIn("Terms", result["error"])
+        self.assertIsNone(self.db.users.find_one({"email": email}))
+
+    def test_admin_signup_via_is_admin_flag_is_exempt_regardless_of_blank_role(self):
+        # Companion regression test: get_user_collection() routes to db_main.admins
+        # whenever is_admin=True, REGARDLESS of role — a check keyed on role alone
+        # (rather than the actual is_admin-or-role=="admin" condition) would incorrectly
+        # demand consent on this request even though role=="" here doesn't mean "gamer
+        # signup", since is_admin=True overrides it. Must succeed exactly like the
+        # equivalent test in test_razorpay_password_gate.py, just with role="" instead of
+        # role="admin" to prove is_admin alone is enough to trigger the exemption.
+        owner_email = self.unique_email("admin-consent-check")
+        self.make_cafe(owner_email=owner_email)
+        enc_gamertag, enc_email, enc_password, enc_rzp, iv = self.encrypt_with_shared_iv(
+            "Owner", owner_email, "CorrectHorseBattery1", "RzpDifferent2"
+        )
+        result, code = auth_handler.bookmyconsole_register(
+            enc_gamertag, enc_email, enc_password, iv,
+            phone=None, is_admin=True, role="", razorpay_password=enc_rzp,
+        )
+        self.assertEqual(code, 200, result)
+        admin_doc = self.db.admins.find_one({"email": owner_email})
+        self.track("admins", admin_doc["_id"])
+        self.assertNotIn("termsAccepted", admin_doc)
+
 
 class CafeValidationTests(SecurityTestCase):
     """cafes.py create/update — price bounds, coordinate bounds, email/phone/URL format."""

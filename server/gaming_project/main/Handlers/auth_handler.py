@@ -373,10 +373,18 @@ def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=F
         return {"error": error}, 400
     # SECURITY: the checkbox gating this on the gamer/website-user signup forms is
     # client-side only and therefore bypassable by anyone calling this endpoint
-    # directly — enforce consent here too. Scoped to gamer + website_user roles only:
-    # cafe-owner (admin) accounts are provisioned through a separate onboarding flow
-    # on a different frontend that doesn't collect this consent yet.
-    if role in ("", "user", "website_user") and not terms_accepted:
+    # directly — enforce consent here too. Must mirror get_user_collection()'s actual
+    # routing decision exactly (via is_cafe_owner_signup, already computed above), not a
+    # plain role allowlist/denylist — get_user_collection() routes to db_main.admins
+    # whenever is_admin is True REGARDLESS of role, and falls through to db_main.users
+    # for any role value it doesn't recognize (a typo, "gamer", anything). A check keyed
+    # on role alone would either wrongly demand consent from a real admin request, or
+    # let an unrecognized role create a real gamer account while silently skipping
+    # consent — is_cafe_owner_signup already tracks the same (is_admin or role=="admin")
+    # condition get_user_collection uses. super_admin can only reach this point already
+    # authenticated as an existing super admin (see reject_unauthorized_super_admin_role
+    # in views.py, called before this) so it's exempted the same way.
+    if not is_cafe_owner_signup and role != "super_admin" and not terms_accepted:
         return {"error": "You must accept the Terms & Conditions, Privacy Policy and Cancellation & Refund Policy to register."}, 400
     if is_cafe_owner_signup:
         if not dec_razorpay_password:
@@ -413,7 +421,7 @@ def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=F
         "createdAt":     datetime.now(IST),
         "role":          role if role else ("admin" if is_admin else "user"),
     }
-    if role in ("", "user", "website_user"):
+    if not is_cafe_owner_signup and role != "super_admin":
         new_user_doc["termsAccepted"] = True
         new_user_doc["privacyAccepted"] = True
         new_user_doc["cancellationPolicyAccepted"] = True
@@ -757,11 +765,17 @@ def bookmyconsole_google_auth_code_verify(code: str, is_admin=False, role="", te
 
         is_new = not user
         if is_new:
-            # SECURITY: mirrors the same consent gate enforced in bookmyconsole_register —
-            # the client disables the "Continue with Google" button until the box is
-            # checked, but that's bypassable by hitting this endpoint directly. Existing
-            # users signing back in are never affected since this only runs on creation.
-            if role in ("", "user", "website_user") and not terms_accepted:
+            # SECURITY: mirrors the same consent gate enforced in bookmyconsole_register,
+            # keyed off the same (is_admin or role=="admin") condition that decides
+            # get_user_collection()'s actual routing — not role alone, which would either
+            # wrongly demand consent from a real admin Google sign-in (is_admin=True
+            # routes to db_main.admins regardless of role) or let an unrecognized role
+            # create a real gamer account while silently skipping consent. The client
+            # disables the "Continue with Google" button until the box is checked, but
+            # that's bypassable by hitting this endpoint directly. Existing users signing
+            # back in are never affected since this only runs on creation.
+            is_cafe_owner_signup = (is_admin or role == "admin") and role != "super_admin"
+            if not is_cafe_owner_signup and role != "super_admin" and not terms_accepted:
                 return {"error": "You must accept the Terms & Conditions, Privacy Policy and Cancellation & Refund Policy to create an account."}, 400
             new_google_user_doc = {
                 "gamertag":      derived_gamertag,
@@ -774,7 +788,7 @@ def bookmyconsole_google_auth_code_verify(code: str, is_admin=False, role="", te
                 "createdAt":     datetime.now(IST),
                 "role":          role if role else ("admin" if is_admin else "user"),
             }
-            if role in ("", "user", "website_user"):
+            if not is_cafe_owner_signup and role != "super_admin":
                 new_google_user_doc["termsAccepted"] = True
                 new_google_user_doc["privacyAccepted"] = True
                 new_google_user_doc["cancellationPolicyAccepted"] = True
