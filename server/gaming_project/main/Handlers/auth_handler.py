@@ -63,6 +63,14 @@ if not JWT_SECRET:
     raise RuntimeError("JWT_SECRET environment variable is not set.")
 JWT_ALGORITHM         = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXP_DELTA_SECONDS = int(os.getenv("JWT_EXP_DELTA_SECONDS", "2592000"))
+
+# Play Store review: Google's reviewers can't receive a real emailed OTP, so one
+# designated reviewer account (NOT a real user - configured entirely via env, separate
+# from this app's own database of accounts) gets a fixed, non-expiring code instead -
+# see the bypass in bookmyconsole_verify_otp. Both empty by default, so this only ever
+# activates if explicitly configured for a store submission.
+PLAYSTORE_REVIEWER_EMAIL = os.getenv("PLAYSTORE_REVIEWER_EMAIL", "").strip().lower()
+PLAYSTORE_REVIEWER_OTP   = os.getenv("PLAYSTORE_REVIEWER_OTP", "").strip()
 # Shorter-lived sessions for the cafe-owner and super-admin panels (playhub-command /
 # cafe-command-center) — these control real money/cafe data, so they shouldn't stay
 # logged in for the same 30 days as a casual gamer-app session.
@@ -527,29 +535,41 @@ def bookmyconsole_verify_otp(email, otp_code, iv, is_admin=False, role=""):
     if user.get("status") in ("Blocked", "Suspended"):
         return {"error": "This account has been suspended. Please contact support."}, 403
 
-    stored_otp = user.get("otp_code")
-    otp_exp    = user.get("otp_expiry")
-    if not stored_otp or not otp_exp:
-        return {"error": "No OTP request found."}, 400
+    # Play Store review: this ONE designated account (configured via env, see
+    # PLAYSTORE_REVIEWER_EMAIL above) can complete login with a fixed, non-expiring
+    # code instead of a real emailed OTP - Google's reviewers have no inbox to check.
+    # Every other account is entirely unaffected and still goes through the real,
+    # random, time-limited OTP checked below.
+    is_reviewer_bypass = (
+        bool(PLAYSTORE_REVIEWER_EMAIL) and bool(PLAYSTORE_REVIEWER_OTP)
+        and dec_email == PLAYSTORE_REVIEWER_EMAIL
+        and hmac.compare_digest(dec_otp, PLAYSTORE_REVIEWER_OTP)
+    )
 
-    if otp_exp.tzinfo is None:
-        otp_exp = otp_exp.replace(tzinfo=timezone.utc).astimezone(IST)
-    if datetime.now(IST) > otp_exp:
-        return {"error": "OTP has expired. Please request a new code."}, 400
+    if not is_reviewer_bypass:
+        stored_otp = user.get("otp_code")
+        otp_exp    = user.get("otp_expiry")
+        if not stored_otp or not otp_exp:
+            return {"error": "No OTP request found."}, 400
 
-    if not verify_otp_hash(stored_otp, dec_otp):
-        # SECURITY: bound OTP guessing — a 6-digit code has only 1,000,000 possibilities,
-        # so unlimited attempts against a single OTP would make it brute-forceable.
-        # Invalidate the OTP outright after too many wrong guesses.
-        attempts = int(user.get("otp_attempts", 0)) + 1
-        if attempts >= MAX_OTP_ATTEMPTS:
-            coll.update_one(
-                {"_id": user["_id"]},
-                {"$unset": {"otp_code": "", "otp_expiry": "", "otp_attempts": ""}}
-            )
-            return {"error": "Too many incorrect attempts. Please request a new code."}, 429
-        coll.update_one({"_id": user["_id"]}, {"$set": {"otp_attempts": attempts}})
-        return {"error": "Invalid verification code."}, 400
+        if otp_exp.tzinfo is None:
+            otp_exp = otp_exp.replace(tzinfo=timezone.utc).astimezone(IST)
+        if datetime.now(IST) > otp_exp:
+            return {"error": "OTP has expired. Please request a new code."}, 400
+
+        if not verify_otp_hash(stored_otp, dec_otp):
+            # SECURITY: bound OTP guessing — a 6-digit code has only 1,000,000 possibilities,
+            # so unlimited attempts against a single OTP would make it brute-forceable.
+            # Invalidate the OTP outright after too many wrong guesses.
+            attempts = int(user.get("otp_attempts", 0)) + 1
+            if attempts >= MAX_OTP_ATTEMPTS:
+                coll.update_one(
+                    {"_id": user["_id"]},
+                    {"$unset": {"otp_code": "", "otp_expiry": "", "otp_attempts": ""}}
+                )
+                return {"error": "Too many incorrect attempts. Please request a new code."}, 429
+            coll.update_one({"_id": user["_id"]}, {"$set": {"otp_attempts": attempts}})
+            return {"error": "Invalid verification code."}, 400
 
     # BUG FIX: this used to unconditionally set status="Active" on every successful OTP
     # verification, regardless of what it was before - meaning a suspended user whose
