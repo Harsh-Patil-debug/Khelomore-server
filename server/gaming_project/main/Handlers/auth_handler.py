@@ -456,8 +456,12 @@ def bookmyconsole_login(email, password, iv, is_admin=False, role=""):
         if not cafe_exists:
             return {"error": "This account is not associated with any registered gaming cafe. Access denied."}, 403
 
-    if user.get("status") == "Blocked":
-        return {"error": "This account has been blocked."}, 403
+    # BUG FIX: the super admin panel's "Suspend" action sets status="Suspended", but this
+    # check only ever looked for "Blocked" - a different string that nothing in the app
+    # actually sets. A suspended user could log in completely normally. Both are now
+    # treated as blocking login.
+    if user.get("status") in ("Blocked", "Suspended"):
+        return {"error": "This account has been suspended. Please contact support."}, 403
 
     # SECURITY: bound password-guessing against a known email. Without this, an attacker
     # could try unlimited passwords for one account — the only thing stopping them
@@ -517,6 +521,12 @@ def bookmyconsole_verify_otp(email, otp_code, iv, is_admin=False, role=""):
     if not user:
         return {"error": "Session not found. Please start again."}, 404
 
+    # SECURITY: defensive re-check - if an account was suspended/blocked in the moments
+    # between step 1 (login) and step 2 (this call), don't let a still-valid OTP issue a
+    # token anyway.
+    if user.get("status") in ("Blocked", "Suspended"):
+        return {"error": "This account has been suspended. Please contact support."}, 403
+
     stored_otp = user.get("otp_code")
     otp_exp    = user.get("otp_expiry")
     if not stored_otp or not otp_exp:
@@ -541,11 +551,16 @@ def bookmyconsole_verify_otp(email, otp_code, iv, is_admin=False, role=""):
         coll.update_one({"_id": user["_id"]}, {"$set": {"otp_attempts": attempts}})
         return {"error": "Invalid verification code."}, 400
 
+    # BUG FIX: this used to unconditionally set status="Active" on every successful OTP
+    # verification, regardless of what it was before - meaning a suspended user whose
+    # next login attempt got this far (e.g. before the check above existed) would have
+    # their own login silently un-suspend them. Only ever activate a genuinely new
+    # ("Pending") account; leave any other status untouched.
     is_new = user.get("status") == "Pending"
-    coll.update_one(
-        {"_id": user["_id"]},
-        {"$set": {"status": "Active"}, "$unset": {"otp_code": "", "otp_expiry": "", "otp_attempts": ""}}
-    )
+    update_fields = {"$unset": {"otp_code": "", "otp_expiry": "", "otp_attempts": ""}}
+    if is_new:
+        update_fields["$set"] = {"status": "Active"}
+    coll.update_one({"_id": user["_id"]}, update_fields)
 
     if is_new:
         gamertag = user.get("gamertag") or user.get("first_name", "PLAYER")
@@ -613,7 +628,7 @@ def bookmyconsole_forgot_password(email, iv, is_admin=False, role=""):
         enc_resp, iv2 = encrypt_data(json.dumps(generic_message), ENCRYPTION_KEY)
         return {"encrypted_response": enc_resp, "iv": iv2}, 200
 
-    if not user or user.get("status") == "Blocked" or not user.get("password_hash"):
+    if not user or user.get("status") in ("Blocked", "Suspended") or not user.get("password_hash"):
         return _respond()
 
     # Same resend-cooldown protection as OTP resend — without it, an attacker with email
@@ -760,8 +775,8 @@ def bookmyconsole_google_auth_code_verify(code: str, is_admin=False, role="", te
 
         user = coll.find_one({"email": email})
 
-        if user and user.get("status") == "Blocked":
-            return {"error": "This account has been blocked."}, 403
+        if user and user.get("status") in ("Blocked", "Suspended"):
+            return {"error": "This account has been suspended. Please contact support."}, 403
 
         is_new = not user
         if is_new:

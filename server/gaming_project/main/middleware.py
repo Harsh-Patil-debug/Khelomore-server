@@ -36,6 +36,20 @@ class OriginValidationMiddleware:
         if request.method not in UNSAFE_METHODS:
             return False
 
+        # BUG FIX: a request can carry an auth cookie without actually being
+        # cookie-authenticated. Android's native networking (OkHttp, used under
+        # React Native's fetch/XHR) persists any Set-Cookie a server ever sends and
+        # silently re-attaches it to later requests to the same host — the mobile app
+        # never reads or relies on this cookie, it only uses the Authorization header,
+        # but the incidental cookie was enough to trip this check and reject
+        # legitimate app requests (e.g. self-service account deletion) with no real
+        # forgery involved. A valid Bearer header on its own is already unforgeable by
+        # a third-party site, so its presence is checked first and makes the request
+        # safe regardless of what cookies happen to be riding along.
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer ") and len(auth_header) > len("Bearer "):
+            return False
+
         if not any(request.COOKIES.get(name) for name in AUTH_COOKIE_NAMES):
             return False  # not cookie-authenticated — Authorization-header requests are safe
 
