@@ -55,6 +55,17 @@ class OriginValidationMiddleware:
 
         source = request.headers.get("Origin") or request.headers.get("Referer")
         if not source:
-            return True  # cookie-authenticated write with no Origin/Referer at all — reject
+            # BUG FIX: this used to reject outright, which - combined with the Android
+            # incidental-cookie issue above - blocked ALL native app traffic on ANY
+            # unsafe-method endpoint that runs before a Bearer token exists yet (e.g.
+            # signup, before the account/token is even created). The "reject when
+            # missing" defensiveness doesn't actually buy real protection: a genuine
+            # forged cross-origin request from a browser (fetch, XHR, or even a plain
+            # HTML form POST) always carries an Origin header - browsers attach it
+            # automatically for any cross-origin request and JS cannot suppress it,
+            # unlike Referer which a page can hide via referrer-policy. A request with
+            # neither header essentially can only be non-browser (native app, direct
+            # API call) traffic, which this check was never meant to restrict.
+            return False
 
         return not any(source == o or source.startswith(o + "/") for o in allowed_origins)
