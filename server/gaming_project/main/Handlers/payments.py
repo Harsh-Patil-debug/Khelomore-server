@@ -211,7 +211,7 @@ def create_razorpay_order_handler(amount_in_inr, key_id=None, key_secret=None):
         }
 
 
-def create_cafe_booking_order_handler(cafe_id, amount_in_inr):
+def create_cafe_booking_order_handler(cafe_id, amount_in_inr, zone=None, date=None, slots=None, rig=None):
     """
     Creates a Razorpay order for a booking at a specific cafe, using that cafe's own
     Razorpay account if the owner has configured one (cafe-command-center → Cafe
@@ -221,6 +221,14 @@ def create_cafe_booking_order_handler(cafe_id, amount_in_inr):
     the source of truth verify_razorpay_payment consults later (never the client), and
     lets bookings_handler stamp "settled directly to cafe" vs "held by platform, needs
     manual payout" onto the resulting booking.
+
+    zone/date/slots/rig are only passed for slot-booking payments (never tournament
+    entry, which has no slot). When present, this atomically HOLDS those exact slots
+    before the Razorpay order is even created — see hold_slots_for_payment. That's what
+    actually stops "pay in full for a slot someone else already took, then get told to
+    contact support for a refund": the slot is claimed the instant checkout starts, not
+    just soft-checked and hoped-for, so a losing concurrent request is rejected here,
+    before it ever reaches Razorpay, instead of after paying.
     """
     from .db_connection import db_main
     if not ObjectId.is_valid(str(cafe_id)):
@@ -228,6 +236,15 @@ def create_cafe_booking_order_handler(cafe_id, amount_in_inr):
     cafe = db_main.cafes.find_one({"_id": ObjectId(cafe_id)})
     if not cafe:
         return {"status": "error", "message": "Cafe not found."}
+
+    hold_token = None
+    if date and slots:
+        import uuid
+        from .bookings_handler import hold_slots_for_payment
+        hold_token = uuid.uuid4().hex
+        ok, message = hold_slots_for_payment(str(cafe_id), str(date), zone, slots, rig, hold_token)
+        if not ok:
+            return {"status": "error", "message": message}
 
     key_id, key_secret, used_platform_fallback = get_cafe_razorpay_credentials(cafe)
     order = create_razorpay_order_handler(amount_in_inr, key_id, key_secret)
@@ -237,8 +254,39 @@ def create_cafe_booking_order_handler(cafe_id, amount_in_inr):
             "order_id": order["id"],
             "cafe_id": str(cafe_id),
             "used_platform_fallback": used_platform_fallback,
+            "hold_token": hold_token,
+            "hold_date": date,
+            "hold_slots": slots,
+            "hold_rig": rig,
         })
+    elif hold_token:
+        # Order creation failed or fell back to a mock (missing Razorpay creds) — release
+        # the hold immediately rather than leaving it to sit out its full TTL for nothing.
+        from .bookings_handler import release_slot_hold
+        release_slot_hold(str(cafe_id), str(date), rig, slots or [], hold_token)
 
     order["key_id"] = key_id
     order["used_platform_fallback"] = used_platform_fallback
     return order
+
+
+def release_cafe_booking_hold(cafe_id, order_id):
+    """
+    Explicitly releases a pre-payment slot hold when the customer cancels or fails
+    checkout, so the slot frees up immediately instead of waiting out the TTL (see
+    hold_slots_for_payment). Best-effort UX nicety only — the TTL index on
+    slot_locks.expires_at is what actually guarantees an abandoned hold (app killed,
+    network drop, anything that never calls this) can't lock a slot forever.
+    """
+    from .db_connection import db_main
+    from .bookings_handler import release_slot_hold
+    order_record = db_main.cafe_payment_orders.find_one({"order_id": order_id, "cafe_id": str(cafe_id)})
+    if not order_record or not order_record.get("hold_token"):
+        return
+    release_slot_hold(
+        str(cafe_id),
+        order_record.get("hold_date"),
+        order_record.get("hold_rig"),
+        order_record.get("hold_slots") or [],
+        order_record.get("hold_token"),
+    )

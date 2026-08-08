@@ -1190,10 +1190,37 @@ class CafeBookingOrderCreateView(APIView):
         amount = request.data.get("amount")
         if amount is None:
             return Response({"status": "error", "message": "Missing 'amount' parameter"}, status=status.HTTP_400_BAD_REQUEST)
-        response = payments.create_cafe_booking_order_handler(cafe_id, amount)
+        # zone/date/slots/rig are only sent by the slot-booking checkout flow (never
+        # tournament entry, which has no slot) — when present they let order creation
+        # reject an already-taken slot BEFORE payment instead of after.
+        zone = request.data.get("zone")
+        date = request.data.get("date")
+        slots = request.data.get("slots")
+        rig = request.data.get("rig")
+        response = payments.create_cafe_booking_order_handler(cafe_id, amount, zone=zone, date=date, slots=slots, rig=rig)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)
+
+
+class CafeBookingReleaseHoldView(APIView):
+    """
+    POST /cafes/<cafe_id>/payments/release-hold/ — Releases a pre-payment slot hold
+    (see create_cafe_booking_order_handler) when the customer cancels or fails checkout,
+    so the slot is bookable by someone else immediately instead of waiting out its TTL.
+    Only ever releases the hold tied to the given order_id, which the caller already owns
+    from their own just-created order — never a confirmed booking or a different hold.
+    """
+    def post(self, request, cafe_id):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+
+        order_id = request.data.get("order_id")
+        if not order_id:
+            return Response({"status": "error", "message": "Missing 'order_id' parameter"}, status=status.HTTP_400_BAD_REQUEST)
+        payments.release_cafe_booking_hold(cafe_id, order_id)
+        return Response({"status": "success"}, status=status.HTTP_200_OK)
 
 
 class SubscriptionsListView(APIView):

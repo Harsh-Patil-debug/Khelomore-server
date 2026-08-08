@@ -22,6 +22,10 @@ def _ensure_slot_locks_index():
             db_main.slot_locks.create_index(
                 [("cafe_id", 1), ("rig", 1), ("date", 1), ("slot", 1)], unique=True
             )
+            # TTL cleanup for abandoned pre-payment holds (see hold_slots_for_payment) —
+            # a confirmed booking's lock doc never has expires_at set, so this can never
+            # touch a real booking, only an unpaid/abandoned hold.
+            db_main.slot_locks.create_index("expires_at", expireAfterSeconds=0)
         except Exception:
             pass
         _slot_locks_index_ensured = True
@@ -122,6 +126,109 @@ def get_booked_slots_handler(cafe_id: str, zone: str, date: str):
             "message": f"Failed to retrieve booked slots: {str(e)}"
         }, 500
 
+def check_slot_conflict(cafe_id: str, date: str, zone: "str | None", slots: list, rig: "str | None" = None):
+    """
+    Read-only conflict check shared by two call sites: the pre-payment check in
+    create_cafe_booking_order_handler (payments.py), so a user is told a slot is taken
+    BEFORE paying rather than after, and step 1 of create_booking_handler below, which
+    re-checks post-payment since this read can still race (see the atomic slot_locks
+    claim later in create_booking_handler, which is the actual source of truth).
+    Returns (conflict_message_or_None,).
+    """
+    existing_bookings = list(db_main.bookings.find({
+        "cafe_id": cafe_id,
+        "date": date,
+        "status": {"$in": ["Upcoming", "Active"]}
+    }))
+
+    if rig:
+        clean_req_rig = rig.replace("•", "·").replace("  ", " ").split("·")[0].strip()
+        for b in existing_bookings:
+            b_rig = b.get("rig", "").replace("•", "·").replace("  ", " ").split("·")[0].strip()
+            if b_rig == clean_req_rig:
+                b_slots = b.get("slots", [])
+                overlapping = [s for s in slots if s in b_slots]
+                if overlapping:
+                    return f"Conflict detected: Station '{clean_req_rig}' is already booked for slots {overlapping}."
+        return None
+
+    # Fallback to zone-wide capacity validation if no specific rig is selected
+    rigs = list(db_main.rigs.find({"cafe_id": cafe_id}))
+    if zone == "Console Lounge":
+        matching_rigs = [r for r in rigs if r.get("type", "").upper() in ["PS5", "XBOX"]]
+    else:
+        matching_rigs = [r for r in rigs if r.get("type", "").upper() == "PC"]
+
+    matching_rig_names = {r.get("name") for r in matching_rigs}
+
+    for slot in slots:
+        bookings_for_slot = 0
+        for b in existing_bookings:
+            b_rig = b.get("rig", "").replace("•", "·").replace("  ", " ").split("·")[0].strip()
+            if b_rig in matching_rig_names and slot in b.get("slots", []):
+                bookings_for_slot += 1
+        if bookings_for_slot >= len(matching_rigs) and len(matching_rigs) > 0:
+            return f"Conflict detected: All stations in {zone} are fully booked for slot '{slot}'."
+    return None
+
+
+def hold_slots_for_payment(cafe_id: str, date: str, zone: "str | None", slots: list, rig: "str | None", hold_token: str, hold_minutes: int = 10):
+    """
+    Atomically reserves (cafe_id, rig, date, slot) for each requested slot BEFORE payment
+    starts, using the same slot_locks unique index create_booking_handler's final claim
+    uses. This is what actually closes the "two people both pass the read-only
+    availability check, both pay, only one wins" race — instead of checking then hoping,
+    the slot is claimed the instant checkout begins, so the loser is rejected before
+    paying, not after. expires_at (TTL-indexed) means an abandoned checkout — closed,
+    timed out, app killed — releases the slot on its own without needing an explicit
+    release call; release_slot_hold below is just the fast path for a clean cancel.
+    owner_token (the caller's Razorpay order id) proves a later confirm/release call
+    actually owns this specific hold, not merely that a lock document happens to exist.
+    Returns (ok: bool, message: str | None).
+    """
+    if not rig:
+        # Auto-assign/zone-capacity bookings have no single lock key to hold atomically
+        # (capacity is a count threshold, not one key) — fall back to the read-only
+        # check. The mobile customer payment flow always supplies a specific rig, so this
+        # path is only hit by callers outside that flow.
+        message = check_slot_conflict(cafe_id, date, zone, slots, rig)
+        return (message is None), message
+
+    _ensure_slot_locks_index()
+    clean_rig_key = rig.split("·")[0].strip()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=hold_minutes)
+    lock_docs = [
+        {"cafe_id": cafe_id, "rig": clean_rig_key, "date": date, "slot": s,
+         "expires_at": expires_at, "owner_token": hold_token}
+        for s in slots
+    ]
+    try:
+        db_main.slot_locks.insert_many(lock_docs, ordered=True)
+        return True, None
+    except DuplicateKeyError:
+        return False, ("That station/slot is already booked or is currently being paid "
+                        "for by someone else. Please pick a different slot.")
+    except Exception as e:
+        return False, f"Failed to hold slot: {e}"
+
+
+def release_slot_hold(cafe_id: str, date: str, rig: "str | None", slots: list, hold_token: "str | None"):
+    """Releases an unconfirmed hold immediately (checkout was cancelled/failed) instead of
+    waiting out the TTL. Matches on owner_token, so this can only ever delete a hold this
+    exact checkout created — never a confirmed booking (which has no owner_token once
+    create_booking_handler confirms it) or a different, still-valid hold."""
+    if not rig or not hold_token:
+        return
+    clean_rig_key = rig.split("·")[0].strip()
+    try:
+        db_main.slot_locks.delete_many({
+            "cafe_id": cafe_id, "rig": clean_rig_key, "date": date,
+            "slot": {"$in": slots}, "owner_token": hold_token,
+        })
+    except Exception:
+        pass
+
+
 def _resolve_hourly_price(cafe_id, rig_name=None):
     """Looks up the authoritative hourly price for a booking from the DB — never trust a client-supplied price."""
     if rig_name:
@@ -163,46 +270,9 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
             return {"status": "error", "message": "No slots selected"}, 400
 
         # 1. Validate availability at the specific machine level
-        existing_bookings = list(db_main.bookings.find({
-            "cafe_id": cafe_id,
-            "date": date,
-            "status": {"$in": ["Upcoming", "Active"]}
-        }))
-        
-        if rig:
-            clean_req_rig = rig.replace("•", "·").replace("  ", " ").split("·")[0].strip()
-            
-            for b in existing_bookings:
-                b_rig = b.get("rig", "").replace("•", "·").replace("  ", " ").split("·")[0].strip()
-                if b_rig == clean_req_rig:
-                    b_slots = b.get("slots", [])
-                    overlapping = [s for s in slots if s in b_slots]
-                    if overlapping:
-                        return {
-                            "status": "error",
-                            "message": f"Conflict detected: Station '{clean_req_rig}' is already booked for slots {overlapping}."
-                        }, 400
-        else:
-            # Fallback to zone-wide capacity validation if no specific rig is selected
-            rigs = list(db_main.rigs.find({"cafe_id": cafe_id}))
-            if zone == "Console Lounge":
-                matching_rigs = [r for r in rigs if r.get("type", "").upper() in ["PS5", "XBOX"]]
-            else:
-                matching_rigs = [r for r in rigs if r.get("type", "").upper() == "PC"]
-            
-            matching_rig_names = {r.get("name") for r in matching_rigs}
-            
-            for slot in slots:
-                bookings_for_slot = 0
-                for b in existing_bookings:
-                    b_rig = b.get("rig", "").replace("•", "·").replace("  ", " ").split("·")[0].strip()
-                    if b_rig in matching_rig_names and slot in b.get("slots", []):
-                        bookings_for_slot += 1
-                if bookings_for_slot >= len(matching_rigs) and len(matching_rigs) > 0:
-                    return {
-                        "status": "error",
-                        "message": f"Conflict detected: All stations in {zone} are fully booked for slot '{slot}'."
-                    }, 400
+        conflict_message = check_slot_conflict(cafe_id, date, zone, slots, rig)
+        if conflict_message:
+            return {"status": "error", "message": conflict_message}, 400
 
         # 2. Determine rig name: Use client's selected rig if provided
         if rig:
@@ -278,6 +348,7 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
         total_price = int(hourly_price * len(slots))
 
         payment_settlement = None
+        hold_token = None
         if total_price > 0:
             from .payments import verify_razorpay_payment
             if not verify_razorpay_payment(razorpay_order_id, razorpay_payment_id, razorpay_signature, total_price * 100, cafe_id=cafe_id):
@@ -291,6 +362,11 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
             # and settled to the owner manually later.
             order_record = db_main.cafe_payment_orders.find_one({"order_id": razorpay_order_id, "cafe_id": cafe_id})
             payment_settlement = "platform_pending_payout" if (order_record and order_record.get("used_platform_fallback")) else "direct_to_cafe"
+            # If order creation held these exact slots (see create_cafe_booking_order_handler
+            # / hold_slots_for_payment), step 4 below confirms that hold instead of claiming
+            # fresh — this is what makes the payment step's atomic claim into the final,
+            # decisive one, not just another read-then-hope check.
+            hold_token = order_record.get("hold_token") if order_record else None
         else:
             payment_status = "paid"  # free slot, nothing owed
 
@@ -356,16 +432,18 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
 
             inserted_bookings.append(doc)
 
-        # 4. Atomically claim every slot before persisting the booking. The availability
-        # check in step 1 and this claim are separated by rig resolution + a real Razorpay
-        # payment round-trip — plenty of time for two concurrent requests to both pass
-        # step 1's read, both pay, and both reach here for the same rig/slot. A unique
-        # index (cafe_id, rig, date, slot) makes the second claim fail at the database
-        # level rather than silently double-booking; wrapping the claim and the booking
-        # insert in one transaction means either both succeed or neither does.
+        # 4. Atomically claim every slot before persisting the booking. If order creation
+        # already put a hold on these exact (rig, date, slot) keys (see
+        # hold_slots_for_payment), confirm that hold — it was claimed the instant checkout
+        # began, which is the real fix for two concurrent requests both passing an
+        # availability read and both paying. Any slot without a matching owned hold (a
+        # free booking, or a hold that expired during a slow checkout) falls back to
+        # claiming fresh here, same as before. A unique index (cafe_id, rig, date, slot)
+        # makes a losing claim fail at the database level rather than silently
+        # double-booking; wrapping every claim/confirm and the booking insert in one
+        # transaction means either all of it succeeds or none of it does.
         _ensure_slot_locks_index()
         clean_rig_key = rig.split("·")[0].strip() if rig else ""
-        lock_docs = [{"cafe_id": cafe_id, "rig": clean_rig_key, "date": date, "slot": s} for s in slots]
 
         client = get_client()
         if client is None:
@@ -374,7 +452,19 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
         try:
             with client.start_session() as session:
                 with session.start_transaction():
-                    db_main.slot_locks.insert_many(lock_docs, ordered=True, session=session)
+                    for s in slots:
+                        lock_key = {"cafe_id": cafe_id, "rig": clean_rig_key, "date": date, "slot": s}
+                        confirmed = None
+                        if hold_token:
+                            confirmed = db_main.slot_locks.find_one_and_update(
+                                {**lock_key, "owner_token": hold_token},
+                                {"$unset": {"expires_at": "", "owner_token": ""}},
+                                session=session,
+                            )
+                        if not confirmed:
+                            # Raises DuplicateKeyError if someone else's confirmed booking
+                            # or still-valid hold already owns this exact key.
+                            db_main.slot_locks.insert_one(lock_key, session=session)
                     if len(inserted_bookings) > 1:
                         db_main.bookings.insert_many(inserted_bookings, session=session)
                     else:

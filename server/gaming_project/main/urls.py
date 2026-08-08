@@ -28,6 +28,7 @@ urlpatterns = [
     path('cafes/<str:cafe_id>/razorpay-credentials/reset-password/', CafeRazorpayPasswordResetView.as_view(), name='cafe_razorpay_password_reset'),
     path('cafes/<str:cafe_id>/razorpay-credentials/verify-password/', CafeRazorpayPasswordVerifyView.as_view(), name='cafe_razorpay_password_verify'),
     path('cafes/<str:cafe_id>/payments/create-order/', CafeBookingOrderCreateView.as_view(), name='cafe_booking_order_create'),
+    path('cafes/<str:cafe_id>/payments/release-hold/', CafeBookingReleaseHoldView.as_view(), name='cafe_booking_release_hold'),
 
     # ── Subscriptions (₹1599/month cafe-owner platform fee) ──────────────────────
     path('cafes/<str:cafe_id>/subscription/', CafeSubscriptionDetailView.as_view(), name='cafe_subscription'),
