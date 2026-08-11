@@ -202,14 +202,29 @@ def hold_slots_for_payment(cafe_id: str, date: str, zone: "str | None", slots: l
          "expires_at": expires_at, "owner_token": hold_token}
         for s in slots
     ]
+
+    client = get_client()
+    if client is None:
+        return False, "Database connection unavailable."
+
+    def _try_claim():
+        # Wrapped in a transaction deliberately — a plain insert_many(ordered=True) can
+        # PARTIALLY succeed: for a multi-slot booking, if slot 1 is free but slot 2
+        # conflicts, Mongo inserts slot 1's lock doc before erroring on slot 2, leaving
+        # an orphaned hold on slot 1 for its full TTL even though the overall claim
+        # correctly failed. The transaction makes it all-or-nothing.
+        with client.start_session() as session:
+            with session.start_transaction():
+                db_main.slot_locks.insert_many(lock_docs, ordered=True, session=session)
+
     try:
-        db_main.slot_locks.insert_many(lock_docs, ordered=True)
+        _try_claim()
         return True, None
     except (DuplicateKeyError, BulkWriteError, OperationFailure) as e:
-        # insert_many raises BulkWriteError on a duplicate key, not DuplicateKeyError
-        # (that's only raised by single-document ops like insert_one) — the write error's
-        # code 11000 is nested inside .details['writeErrors'], not a top-level .code
-        # attribute, so check the string form too rather than relying on getattr alone.
+        # Inside a transaction a duplicate-key error surfaces as OperationFailure (or a
+        # wrapped BulkWriteError), with code 11000 nested in the error's details rather
+        # than a top-level .code — check the string form too rather than relying on
+        # getattr alone.
         is_conflict = getattr(e, "code", None) == 11000 or "E11000" in str(e)
         if not is_conflict:
             return False, f"Failed to hold slot: {e}"
@@ -217,8 +232,9 @@ def hold_slots_for_payment(cafe_id: str, date: str, zone: "str | None", slots: l
         # MongoDB's TTL sweep is periodic (roughly every 60s), not instant at the exact
         # expiry moment — an already-expired hold can still be sitting there and collide
         # with a fresh claim. Self-heal that specific case: remove any lock for these
-        # exact keys that's already past its expiry, then retry once, rather than
-        # rejecting a real booking attempt over background-sweep lag.
+        # exact keys that's already past its expiry, then retry once (also
+        # transactionally), rather than rejecting a real booking attempt over
+        # background-sweep lag.
         now = datetime.now(timezone.utc)
         removed = db_main.slot_locks.delete_many({
             "cafe_id": cafe_id, "rig": clean_rig_key, "date": date,
@@ -226,7 +242,7 @@ def hold_slots_for_payment(cafe_id: str, date: str, zone: "str | None", slots: l
         })
         if removed.deleted_count > 0:
             try:
-                db_main.slot_locks.insert_many(lock_docs, ordered=True)
+                _try_claim()
                 return True, None
             except (DuplicateKeyError, BulkWriteError, OperationFailure):
                 pass  # still conflicting after cleanup — a genuine active claim
