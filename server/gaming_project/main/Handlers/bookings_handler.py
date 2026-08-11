@@ -175,7 +175,7 @@ def check_slot_conflict(cafe_id: str, date: str, zone: "str | None", slots: list
     return None
 
 
-def hold_slots_for_payment(cafe_id: str, date: str, zone: "str | None", slots: list, rig: "str | None", hold_token: str, user_email: "str | None" = None, hold_minutes: int = 10):
+def hold_slots_for_payment(cafe_id: str, date: str, zone: "str | None", slots: list, rig: "str | None", hold_token: str, user_email: "str | None" = None, hold_minutes: int = 5):
     """
     Atomically reserves (cafe_id, rig, date, slot) for each requested slot BEFORE payment
     starts, using the same slot_locks unique index create_booking_handler's final claim
