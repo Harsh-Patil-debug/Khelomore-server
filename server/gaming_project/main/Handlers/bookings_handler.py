@@ -415,7 +415,17 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
         hold_token = None
         if total_price > 0:
             from .payments import verify_razorpay_payment
+            # Looked up BEFORE the verification check (not after) so hold_token is
+            # available to release on a verification failure too, not only in the
+            # success path — otherwise a hold from order-creation time would sit
+            # reserved for its full TTL even though this specific attempt is already
+            # dead and never retried.
+            order_record = db_main.cafe_payment_orders.find_one({"order_id": razorpay_order_id, "cafe_id": cafe_id})
+            hold_token = order_record.get("hold_token") if order_record else None
+
             if not verify_razorpay_payment(razorpay_order_id, razorpay_payment_id, razorpay_signature, total_price * 100, cafe_id=cafe_id):
+                if hold_token:
+                    release_slot_hold(cafe_id, date, rig, slots, hold_token)
                 return {
                     "status": "error",
                     "message": "Payment verification failed. Please complete payment before booking."
@@ -424,13 +434,11 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
             # Record which account the money actually landed in, so a booking paid via the
             # platform fallback (cafe hadn't connected their own Razorpay yet) can be found
             # and settled to the owner manually later.
-            order_record = db_main.cafe_payment_orders.find_one({"order_id": razorpay_order_id, "cafe_id": cafe_id})
             payment_settlement = "platform_pending_payout" if (order_record and order_record.get("used_platform_fallback")) else "direct_to_cafe"
             # If order creation held these exact slots (see create_cafe_booking_order_handler
             # / hold_slots_for_payment), step 4 below confirms that hold instead of claiming
             # fresh — this is what makes the payment step's atomic claim into the final,
             # decisive one, not just another read-then-hope check.
-            hold_token = order_record.get("hold_token") if order_record else None
         else:
             payment_status = "paid"  # free slot, nothing owed
 
@@ -542,6 +550,13 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
             # "slot taken" case (a real transaction/infra failure should stay a 500, not
             # be mislabeled as a conflict).
             is_conflict = getattr(e, "code", None) == 11000 or "E11000" in str(e)
+            # The transaction rolled back entirely on any error here, including our OWN
+            # confirm-updates for whichever of these slots weren't the one that
+            # conflicted — those holds are still sitting there, reserved by us, for an
+            # attempt that's already dead and won't be retried automatically. Release
+            # them now rather than leaving them to block re-booking for the full TTL.
+            if hold_token:
+                release_slot_hold(cafe_id, date, rig, slots, hold_token)
             if is_conflict:
                 # Someone else claimed one of these exact (rig, date, slot) combinations
                 # first — the transaction was rolled back entirely, nothing was written.
