@@ -1,7 +1,7 @@
 import random
 from datetime import datetime, timezone, timedelta
 from bson.objectid import ObjectId
-from pymongo.errors import DuplicateKeyError, OperationFailure
+from pymongo.errors import DuplicateKeyError, OperationFailure, BulkWriteError
 from .db_connection import db_main, get_client
 from .email_handler import send_booking_confirmation_email, send_booking_admin_notification_email
 
@@ -205,7 +205,32 @@ def hold_slots_for_payment(cafe_id: str, date: str, zone: "str | None", slots: l
     try:
         db_main.slot_locks.insert_many(lock_docs, ordered=True)
         return True, None
-    except DuplicateKeyError:
+    except (DuplicateKeyError, BulkWriteError, OperationFailure) as e:
+        # insert_many raises BulkWriteError on a duplicate key, not DuplicateKeyError
+        # (that's only raised by single-document ops like insert_one) — the write error's
+        # code 11000 is nested inside .details['writeErrors'], not a top-level .code
+        # attribute, so check the string form too rather than relying on getattr alone.
+        is_conflict = getattr(e, "code", None) == 11000 or "E11000" in str(e)
+        if not is_conflict:
+            return False, f"Failed to hold slot: {e}"
+
+        # MongoDB's TTL sweep is periodic (roughly every 60s), not instant at the exact
+        # expiry moment — an already-expired hold can still be sitting there and collide
+        # with a fresh claim. Self-heal that specific case: remove any lock for these
+        # exact keys that's already past its expiry, then retry once, rather than
+        # rejecting a real booking attempt over background-sweep lag.
+        now = datetime.now(timezone.utc)
+        removed = db_main.slot_locks.delete_many({
+            "cafe_id": cafe_id, "rig": clean_rig_key, "date": date,
+            "slot": {"$in": slots}, "expires_at": {"$lte": now},
+        })
+        if removed.deleted_count > 0:
+            try:
+                db_main.slot_locks.insert_many(lock_docs, ordered=True)
+                return True, None
+            except (DuplicateKeyError, BulkWriteError, OperationFailure):
+                pass  # still conflicting after cleanup — a genuine active claim
+
         return False, ("That station/slot is already booked or is currently being paid "
                         "for by someone else. Please pick a different slot.")
     except Exception as e:
