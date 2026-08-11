@@ -26,6 +26,9 @@ def _ensure_slot_locks_index():
             # a confirmed booking's lock doc never has expires_at set, so this can never
             # touch a real booking, only an unpaid/abandoned hold.
             db_main.slot_locks.create_index("expires_at", expireAfterSeconds=0)
+            # Backs the "release this user's other open holds" lookup in
+            # hold_slots_for_payment — non-unique, just for lookup speed.
+            db_main.slot_locks.create_index("user_email")
         except Exception:
             pass
         _slot_locks_index_ensured = True
@@ -172,7 +175,7 @@ def check_slot_conflict(cafe_id: str, date: str, zone: "str | None", slots: list
     return None
 
 
-def hold_slots_for_payment(cafe_id: str, date: str, zone: "str | None", slots: list, rig: "str | None", hold_token: str, hold_minutes: int = 10):
+def hold_slots_for_payment(cafe_id: str, date: str, zone: "str | None", slots: list, rig: "str | None", hold_token: str, user_email: "str | None" = None, hold_minutes: int = 10):
     """
     Atomically reserves (cafe_id, rig, date, slot) for each requested slot BEFORE payment
     starts, using the same slot_locks unique index create_booking_handler's final claim
@@ -184,6 +187,15 @@ def hold_slots_for_payment(cafe_id: str, date: str, zone: "str | None", slots: l
     release call; release_slot_hold below is just the fast path for a clean cancel.
     owner_token (the caller's Razorpay order id) proves a later confirm/release call
     actually owns this specific hold, not merely that a lock document happens to exist.
+
+    user_email caps a single account to ONE active unconfirmed hold at a time: before
+    claiming, any of this user's OTHER still-open holds (started, never confirmed into a
+    real booking, never explicitly released) are dropped first. Without this, someone
+    could start checkout and abandon it — closing the app, losing network, force-quitting
+    — across many different slots in a row, and each one would sit reserved for the full
+    TTL, effectively locking out real users slot by slot. Capping it here means the most
+    one account can ever hold at once is whatever's in their current booking attempt, no
+    matter how many times they abandon and restart.
     Returns (ok: bool, message: str | None).
     """
     if not rig:
@@ -196,10 +208,21 @@ def hold_slots_for_payment(cafe_id: str, date: str, zone: "str | None", slots: l
 
     _ensure_slot_locks_index()
     clean_rig_key = rig.split("·")[0].strip()
+
+    if user_email:
+        # Drop this user's own other open holds first — "open" means it still has
+        # expires_at (a confirmed booking's lock never does, so this can never touch a
+        # real booking), and it isn't the hold we're about to take out right now.
+        db_main.slot_locks.delete_many({
+            "user_email": user_email,
+            "expires_at": {"$exists": True},
+            "owner_token": {"$ne": hold_token},
+        })
+
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=hold_minutes)
     lock_docs = [
         {"cafe_id": cafe_id, "rig": clean_rig_key, "date": date, "slot": s,
-         "expires_at": expires_at, "owner_token": hold_token}
+         "expires_at": expires_at, "owner_token": hold_token, "user_email": user_email}
         for s in slots
     ]
 

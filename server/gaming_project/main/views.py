@@ -1197,7 +1197,7 @@ class CafeBookingOrderCreateView(APIView):
         date = request.data.get("date")
         slots = request.data.get("slots")
         rig = request.data.get("rig")
-        response = payments.create_cafe_booking_order_handler(cafe_id, amount, zone=zone, date=date, slots=slots, rig=rig)
+        response = payments.create_cafe_booking_order_handler(cafe_id, amount, zone=zone, date=date, slots=slots, rig=rig, user_email=email)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)

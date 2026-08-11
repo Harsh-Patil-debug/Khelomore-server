@@ -211,7 +211,7 @@ def create_razorpay_order_handler(amount_in_inr, key_id=None, key_secret=None):
         }
 
 
-def create_cafe_booking_order_handler(cafe_id, amount_in_inr, zone=None, date=None, slots=None, rig=None):
+def create_cafe_booking_order_handler(cafe_id, amount_in_inr, zone=None, date=None, slots=None, rig=None, user_email=None):
     """
     Creates a Razorpay order for a booking at a specific cafe, using that cafe's own
     Razorpay account if the owner has configured one (cafe-command-center → Cafe
@@ -242,7 +242,7 @@ def create_cafe_booking_order_handler(cafe_id, amount_in_inr, zone=None, date=No
         import uuid
         from .bookings_handler import hold_slots_for_payment
         hold_token = uuid.uuid4().hex
-        ok, message = hold_slots_for_payment(str(cafe_id), str(date), zone, slots, rig, hold_token)
+        ok, message = hold_slots_for_payment(str(cafe_id), str(date), zone, slots, rig, hold_token, user_email=user_email)
         if not ok:
             return {"status": "error", "message": message}
 
