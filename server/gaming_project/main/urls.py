@@ -21,14 +21,16 @@ urlpatterns = [
     path('cafes/parse-maps-url/', CafeParseMapsUrlView.as_view(), name='parse_maps_url'),
     path('cafes/<str:cafe_id>/', CafeDetailView.as_view(), name='cafe_detail'),
     path('cafes/<str:cafe_id>/restore/', CafeRestoreView.as_view(), name='cafe_restore'),
-    path('cafes/<str:cafe_id>/razorpay-credentials/', CafeRazorpayCredentialsView.as_view(), name='cafe_razorpay_credentials'),
-    path('cafes/<str:cafe_id>/razorpay-credentials/password-status/', CafeRazorpayPasswordStatusView.as_view(), name='cafe_razorpay_password_status'),
-    path('cafes/<str:cafe_id>/razorpay-credentials/set-password/', CafeRazorpayPasswordSetView.as_view(), name='cafe_razorpay_password_set'),
-    path('cafes/<str:cafe_id>/razorpay-credentials/forgot-password/', CafeRazorpayPasswordForgotView.as_view(), name='cafe_razorpay_password_forgot'),
-    path('cafes/<str:cafe_id>/razorpay-credentials/reset-password/', CafeRazorpayPasswordResetView.as_view(), name='cafe_razorpay_password_reset'),
-    path('cafes/<str:cafe_id>/razorpay-credentials/verify-password/', CafeRazorpayPasswordVerifyView.as_view(), name='cafe_razorpay_password_verify'),
+    path('cafes/<str:cafe_id>/payment-credentials/', CafeCashfreeCredentialsView.as_view(), name='cafe_cashfree_credentials'),
+    path('cafes/<str:cafe_id>/payment-credentials/password-status/', CafePaymentPasswordStatusView.as_view(), name='cafe_payment_password_status'),
+    path('cafes/<str:cafe_id>/payment-credentials/set-password/', CafePaymentPasswordSetView.as_view(), name='cafe_payment_password_set'),
+    path('cafes/<str:cafe_id>/payment-credentials/forgot-password/', CafePaymentPasswordForgotView.as_view(), name='cafe_payment_password_forgot'),
+    path('cafes/<str:cafe_id>/payment-credentials/reset-password/', CafePaymentPasswordResetView.as_view(), name='cafe_payment_password_reset'),
+    path('cafes/<str:cafe_id>/payment-credentials/verify-password/', CafePaymentPasswordVerifyView.as_view(), name='cafe_payment_password_verify'),
     path('cafes/<str:cafe_id>/payments/create-order/', CafeBookingOrderCreateView.as_view(), name='cafe_booking_order_create'),
     path('cafes/<str:cafe_id>/payments/release-hold/', CafeBookingReleaseHoldView.as_view(), name='cafe_booking_release_hold'),
+    path('cafes/<str:cafe_id>/payouts/beneficiary/', CafePayoutBeneficiaryView.as_view(), name='cafe_payout_beneficiary'),
+    path('cafes/<str:cafe_id>/payouts/settle/', CafePayoutSettleView.as_view(), name='cafe_payout_settle'),
 
     # ── Subscriptions (₹1599/month cafe-owner platform fee) ──────────────────────
     path('cafes/<str:cafe_id>/subscription/', CafeSubscriptionDetailView.as_view(), name='cafe_subscription'),
@@ -56,7 +58,7 @@ urlpatterns = [
     path('rigs/<str:rig_id>/reserve/', RigReserveView.as_view(), name='rig_reserve'),
 
     # ── Payments ──────────────────────────────────────────────────────────────
-    path('payments/create-order/', RazorpayOrderCreateView.as_view(), name='create_razorpay_order'),
+    path('payments/create-order/', CashfreeOrderCreateView.as_view(), name='create_cashfree_order'),
 
     # ── User Favorites ────────────────────────────────────────────────────────
     path('users/favorites/', UserFavoritesView.as_view(), name='user_favorites'),

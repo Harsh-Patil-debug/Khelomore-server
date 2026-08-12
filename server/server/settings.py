@@ -188,9 +188,16 @@ FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
 
-# Razorpay Keys
-RAZORPAY_KEY_ID = os.getenv('RAZORPAY_KEY_ID', '')
-RAZORPAY_KEY_SECRET = os.getenv('RAZORPAY_KEY_SECRET', '')
+# Cashfree Keys — platform account (subscriptions, tournament entry with no cafe, and the
+# booking-payment fallback when a cafe hasn't connected its own account). CASHFREE_ENV
+# switches sandbox vs production for the whole payments module with one env var.
+CASHFREE_CLIENT_ID = os.getenv('CASHFREE_CLIENT_ID', '')
+CASHFREE_CLIENT_SECRET = os.getenv('CASHFREE_CLIENT_SECRET', '')
+CASHFREE_ENV = os.getenv('CASHFREE_ENV', 'sandbox')
+
+# Cashfree Payouts — separate product, separate credentials (see Handlers/payouts.py)
+CASHFREE_PAYOUTS_CLIENT_ID = os.getenv('CASHFREE_PAYOUTS_CLIENT_ID', '')
+CASHFREE_PAYOUTS_CLIENT_SECRET = os.getenv('CASHFREE_PAYOUTS_CLIENT_SECRET', '')
 
 # Admin Security
 ADMIN_TOKEN = _require_env('ADMIN_TOKEN')

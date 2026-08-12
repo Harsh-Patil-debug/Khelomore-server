@@ -185,7 +185,7 @@ def hold_slots_for_payment(cafe_id: str, date: str, zone: "str | None", slots: l
     paying, not after. expires_at (TTL-indexed) means an abandoned checkout — closed,
     timed out, app killed — releases the slot on its own without needing an explicit
     release call; release_slot_hold below is just the fast path for a clean cancel.
-    owner_token (the caller's Razorpay order id) proves a later confirm/release call
+    owner_token (the caller's Cashfree order id) proves a later confirm/release call
     actually owns this specific hold, not merely that a lock document happens to exist.
 
     user_email caps a single account to ONE active unconfirmed hold at a time: before
@@ -306,11 +306,11 @@ def _resolve_hourly_price(cafe_id, rig_name=None):
     return 150
 
 
-def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: str, date: str, slots: list, rig: str = None, user_name: str = None, user_phone: str = "", razorpay_order_id: str = None, razorpay_payment_id: str = None, razorpay_signature: str = None):
+def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: str, date: str, slots: list, rig: "str | None" = None, user_name: "str | None" = None, user_phone: str = "", cashfree_order_id: "str | None" = None):
     """
     Validates slot availability and saves the booking record.
     Price is always computed server-side from the cafe/rig's hourly rate — a client-supplied
-    price is never trusted. A non-zero price requires a verified Razorpay payment before the
+    price is never trusted. A non-zero price requires a verified Cashfree payment before the
     booking is created and marked paid.
     """
     try:
@@ -414,16 +414,16 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
         payment_settlement = None
         hold_token = None
         if total_price > 0:
-            from .payments import verify_razorpay_payment
+            from .payments import verify_cashfree_payment
             # Looked up BEFORE the verification check (not after) so hold_token is
             # available to release on a verification failure too, not only in the
             # success path — otherwise a hold from order-creation time would sit
             # reserved for its full TTL even though this specific attempt is already
             # dead and never retried.
-            order_record = db_main.cafe_payment_orders.find_one({"order_id": razorpay_order_id, "cafe_id": cafe_id})
+            order_record = db_main.cafe_payment_orders.find_one({"order_id": cashfree_order_id, "cafe_id": cafe_id})
             hold_token = order_record.get("hold_token") if order_record else None
 
-            if not verify_razorpay_payment(razorpay_order_id, razorpay_payment_id, razorpay_signature, total_price * 100, cafe_id=cafe_id):
+            if not verify_cashfree_payment(cashfree_order_id, total_price * 100, cafe_id=cafe_id):
                 if hold_token:
                     release_slot_hold(cafe_id, date, rig, slots, hold_token)
                 return {
@@ -432,8 +432,8 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
                 }, 402
             payment_status = "paid"
             # Record which account the money actually landed in, so a booking paid via the
-            # platform fallback (cafe hadn't connected their own Razorpay yet) can be found
-            # and settled to the owner manually later.
+            # platform fallback (cafe hadn't connected their own Cashfree account yet) can
+            # be found and settled to the owner manually/via Payouts later.
             payment_settlement = "platform_pending_payout" if (order_record and order_record.get("used_platform_fallback")) else "direct_to_cafe"
             # If order creation held these exact slots (see create_cafe_booking_order_handler
             # / hold_slots_for_payment), step 4 below confirms that hold instead of claiming
@@ -560,7 +560,7 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
             if is_conflict:
                 # Someone else claimed one of these exact (rig, date, slot) combinations
                 # first — the transaction was rolled back entirely, nothing was written.
-                # Payment was already captured via Razorpay before this call (the client
+                # Payment was already captured via Cashfree before this call (the client
                 # completes checkout before calling this endpoint), so a race loss here
                 # means the payment needs a manual refund — a real residual gap, not
                 # something this fix resolves, since automated refunds are a separate

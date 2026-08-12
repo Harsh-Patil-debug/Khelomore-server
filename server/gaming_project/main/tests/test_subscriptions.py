@@ -1,7 +1,7 @@
 # test_subscriptions.py
 # Regression tests for the ₹1599/month cafe-owner platform subscription: a brand-new
 # cafe's 15-day free trial, default backfill for pre-existing (pre-trial-feature) cafes,
-# Razorpay order/verify extending the due date correctly, the manual super-admin
+# Cashfree order/verify extending the due date correctly, the manual super-admin
 # override, ownership enforcement, and the grace-period cutoff that hides an unpaid cafe
 # from the public listing without locking the owner out of their own dashboard.
 
@@ -9,6 +9,8 @@ import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
+
+from django.test import override_settings
 
 from ..Handlers import subscriptions
 from ..Handlers.db_connection import get_db
@@ -67,15 +69,11 @@ class AddOneMonthHelperTests(unittest.TestCase):
         self.assertEqual(result, datetime(2026, 2, 28, 12, 0, tzinfo=subscriptions.IST))
 
 
-def _mock_razorpay_client(order_amount, order_status="paid", signature_valid=True):
-    mock_client = MagicMock()
-    if signature_valid:
-        mock_client.utility.verify_payment_signature.return_value = True
-    else:
-        import razorpay.errors
-        mock_client.utility.verify_payment_signature.side_effect = razorpay.errors.SignatureVerificationError("bad sig")
-    mock_client.order.fetch.return_value = {"amount": order_amount, "status": order_status}
-    return mock_client
+def _mock_cashfree_order_status(order_amount, order_status="PAID"):
+    mock_response = MagicMock()
+    mock_response.raise_for_status.return_value = None
+    mock_response.json.return_value = {"order_amount": order_amount, "order_status": order_status}
+    return mock_response
 
 
 class SubscriptionDefaultsTests(SecurityTestCase):
@@ -204,11 +202,12 @@ class SubscriptionOrderAndPaymentTests(SecurityTestCase):
         )
         self.assertEqual(resp.status_code, 200)
         order = resp.json()["order"]
-        self.assertEqual(order["amount"], 159900)  # paise
+        self.assertEqual(order["order_amount"], 1599)  # rupees, not paise — see payments.create_cashfree_order_handler
 
-    @patch("razorpay.Client")
-    def test_verified_payment_during_trial_extends_from_trial_end_and_clears_trial_status(self, mock_client_cls):
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=159900, order_status="paid")
+    @override_settings(CASHFREE_CLIENT_ID="platform_test_client_id", CASHFREE_CLIENT_SECRET="platform_test_secret")
+    @patch("requests.get")
+    def test_verified_payment_during_trial_extends_from_trial_end_and_clears_trial_status(self, mock_get):
+        mock_get.return_value = _mock_cashfree_order_status(order_amount=1599, order_status="PAID")
 
         before = self.client.get(
             f"/api/v1/main/cafes/{self.cafe_id}/subscription/", **self.auth_header(self.owner_token)
@@ -219,9 +218,7 @@ class SubscriptionOrderAndPaymentTests(SecurityTestCase):
         resp = self.client.post(
             f"/api/v1/main/cafes/{self.cafe_id}/subscription/verify/",
             {
-                "razorpay_order_id": f"order_test_{uuid.uuid4().hex[:10]}",
-                "razorpay_payment_id": f"pay_test_{uuid.uuid4().hex[:10]}",
-                "razorpay_signature": "irrelevant-mocked",
+                "cashfree_order_id": f"order_test_{uuid.uuid4().hex[:10]}",
             },
             format="json",
             **self.auth_header(self.owner_token),
@@ -249,13 +246,14 @@ class SubscriptionOrderAndPaymentTests(SecurityTestCase):
         ).json()["history"]
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["amount"], 1599)
-        self.assertEqual(history[0]["method"], "razorpay")
+        self.assertEqual(history[0]["method"], "cashfree")
 
-    @patch("razorpay.Client")
-    def test_verify_rejects_wrong_amount_and_does_not_extend(self, mock_client_cls):
+    @override_settings(CASHFREE_CLIENT_ID="platform_test_client_id", CASHFREE_CLIENT_SECRET="platform_test_secret")
+    @patch("requests.get")
+    def test_verify_rejects_wrong_amount_and_does_not_extend(self, mock_get):
         """A genuinely-paid order for the wrong amount must not unlock a renewal —
         same class of bug this pattern already guards against for bookings."""
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=100, order_status="paid")
+        mock_get.return_value = _mock_cashfree_order_status(order_amount=1, order_status="PAID")
 
         before = self.client.get(
             f"/api/v1/main/cafes/{self.cafe_id}/subscription/", **self.auth_header(self.owner_token)
@@ -264,9 +262,7 @@ class SubscriptionOrderAndPaymentTests(SecurityTestCase):
         resp = self.client.post(
             f"/api/v1/main/cafes/{self.cafe_id}/subscription/verify/",
             {
-                "razorpay_order_id": f"order_test_{uuid.uuid4().hex[:10]}",
-                "razorpay_payment_id": f"pay_test_{uuid.uuid4().hex[:10]}",
-                "razorpay_signature": "irrelevant-mocked",
+                "cashfree_order_id": f"order_test_{uuid.uuid4().hex[:10]}",
             },
             format="json",
             **self.auth_header(self.owner_token),

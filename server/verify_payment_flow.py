@@ -1,30 +1,30 @@
 # verify_payment_flow.py
 # One-off end-to-end verification of the payment-integrity fix (see bookings_handler.py
-# create_booking_handler / payments.verify_razorpay_payment).
+# create_booking_handler / payments.verify_cashfree_payment).
 #
-# Hits Razorpay's REAL test-mode API to create genuine orders, then reproduces Razorpay's
-# REAL signature algorithm (HMAC-SHA256 of "order_id|payment_id" with the account's
-# key_secret) to prove the verification logic behaves correctly against signatures that
-# are cryptographically indistinguishable from ones Razorpay would issue.
+# Hits Cashfree's REAL sandbox API to create genuine orders, then proves the verification
+# logic correctly rejects everything it should.
 #
-# IMPORTANT SCOPE NOTE: verify_razorpay_payment() now also requires the order's real
-# Razorpay status to be "paid" (not just "created") — correctly, since an order that was
-# merely created but never actually paid must never unlock a booking. Completing a REAL
-# payment requires Razorpay's Checkout.js in an actual browser with a test card, which
-# isn't scriptable from here. So this script proves every REJECTION path exhaustively
-# (forged signature, wrong order, unpaid order) using real orders and a real signature
-# algorithm — it does NOT claim to exercise the full real happy path, since that
-# inherently requires a browser. The amount-mismatch and replay-protection LOGIC (which
-# depend on what a *paid* order looks like) are covered by mocked unit tests instead —
-# see gaming_project/main/tests/test_payment_verification.py — since those need to
-# control the "paid, amount=X" response Razorpay would only give after a real payment.
+# IMPORTANT SCOPE NOTE: unlike Razorpay, Cashfree never gives the client a signature to
+# verify at all — verify_cashfree_payment works purely by asking Cashfree's own API what
+# actually happened to a given order_id, using OUR credentials. Completing a REAL payment
+# requires Cashfree's hosted checkout in an actual browser with a sandbox test card,
+# which isn't scriptable from here. So this script proves every REJECTION path
+# exhaustively (unpaid order, unknown order) using real sandbox orders — it does NOT
+# claim to exercise the full real happy path, since that inherently requires a browser.
+# The amount-mismatch and replay-protection LOGIC (which depend on what a *paid* order
+# looks like) are covered by mocked unit tests instead — see
+# gaming_project/main/tests/test_payment_verification.py — since those need to control
+# the "PAID, amount=X" response Cashfree would only give after a real payment.
+#
+# Requires real CASHFREE_CLIENT_ID/CASHFREE_CLIENT_SECRET (sandbox) configured in the
+# environment this runs in — see .env.example. Run this after any change to payments.py
+# before trusting it against real money.
 
-import hashlib
-import hmac
 import os
 import sys
 
-sys.path.append(r"C:\Users\DELL\OneDrive\Desktop\bookmyconsole-server\server")
+sys.path.append(r"C:\Users\DELL\OneDrive\Desktop\khelomore-server\server")
 
 # SAFETY: isolate from real data, same convention as manage.py's `test` routing and
 # verify_super_admin.py's existing precedent in this repo.
@@ -38,62 +38,56 @@ from django.conf import settings
 from gaming_project.main.Handlers import payments
 
 
-def real_razorpay_signature(order_id: str, payment_id: str, key_secret: str) -> str:
-    """Reproduces Razorpay's own signature algorithm (documented in their webhook/
-    checkout verification docs) — NOT a mock of our code."""
-    msg = f"{order_id}|{payment_id}"
-    return hmac.new(key_secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
-
-
 def main():
     print("=" * 70)
-    print("  PAYMENT VERIFICATION — REJECTION-PATH CHECKS (real Razorpay test API)")
+    print("  PAYMENT VERIFICATION — REJECTION-PATH CHECKS (real Cashfree sandbox API)")
     print("=" * 70)
 
-    key_secret = settings.RAZORPAY_KEY_SECRET
-    assert key_secret, "RAZORPAY_KEY_SECRET is not configured."
+    assert getattr(settings, "CASHFREE_ENV", "sandbox") != "production", (
+        "Refusing to run against a production CASHFREE_ENV — this script creates real "
+        "orders and is meant for sandbox verification only."
+    )
+    client_id = settings.CASHFREE_CLIENT_ID
+    client_secret = settings.CASHFREE_CLIENT_SECRET
+    assert client_id and client_secret, "CASHFREE_CLIENT_ID/CASHFREE_CLIENT_SECRET are not configured."
 
-    print("\n[STEP 1] Creating a REAL ₹200 order via the Razorpay test-mode API...")
-    order = payments.create_razorpay_order_handler(200)
+    print("\n[STEP 1] Creating a REAL ₹200 order via the Cashfree sandbox API...")
+    order = payments.create_cashfree_order_handler(200, customer_email="verify-script@bookmyconsole.invalid", customer_phone="9999999999")
     assert not order.get("is_mock"), (
-        "Razorpay returned a MOCK order — real API credentials aren't reachable. "
+        "Cashfree returned a MOCK order — real sandbox credentials aren't reachable. "
         f"Order response: {order}"
     )
-    order_id = order["id"]
-    print(f"  - Real order created: {order_id}  amount={order['amount']} paise  status={order['status']}")
-    assert order["status"] != "paid", "Sanity check failed: a brand-new order should not be 'paid'."
+    order_id = order["order_id"]
+    print(f"  - Real order created: {order_id}  amount={order['order_amount']}  status={order['order_status']}  session={order['payment_session_id']}")
+    assert order["order_status"] != "PAID", "Sanity check failed: a brand-new order should not be 'PAID'."
 
-    fake_payment_id = "pay_sectestSIMULATED0001"
-    valid_signature = real_razorpay_signature(order_id, fake_payment_id, key_secret)
-
-    print("\n[STEP 2] FORGED signature — must be rejected...")
-    forged = valid_signature.replace(valid_signature[0], "0" if valid_signature[0] != "0" else "1")
-    result = payments.verify_razorpay_payment(order_id, fake_payment_id, forged, 20000)
-    print(f"  - Result: {result}")
-    assert result is False, "A forged signature was ACCEPTED — payment bypass still open!"
-
-    print("\n[STEP 3] Signature valid for a DIFFERENT order — must be rejected...")
-    other_order = payments.create_razorpay_order_handler(1)
-    result = payments.verify_razorpay_payment(other_order["id"], fake_payment_id, valid_signature, 100)
-    print(f"  - Result: {result}")
-    assert result is False, "A signature valid for one order was accepted for a different order!"
-
-    print("\n[STEP 4] Real order, correctly-computed signature, but the order was never "
-          "actually PAID (no browser checkout happened) — must be rejected...")
-    result = payments.verify_razorpay_payment(order_id, fake_payment_id, valid_signature, 20000)
+    print("\n[STEP 2] Real order, correct amount, but never actually PAID (no browser "
+          "checkout happened) — must be rejected...")
+    result = payments.verify_cashfree_payment(order_id, 20000)
     print(f"  - Result: {result}")
     assert result is False, (
         "An order that was only CREATED, never actually paid, was accepted as valid "
-        "payment proof — this is exactly the bypass the amount/status check exists to close!"
+        "payment proof — this is exactly the bypass the status check exists to close!"
     )
+
+    print("\n[STEP 3] Unknown/nonexistent order_id — must be rejected...")
+    result = payments.verify_cashfree_payment("order_never_created_by_this_script", 20000)
+    print(f"  - Result: {result}")
+    assert result is False, "A nonexistent order_id was somehow accepted as valid payment proof!"
+
+    print("\n[STEP 4] Non-string order_id (type-confusion / NoSQL-injection shape) — must "
+          "be rejected before ever reaching the network...")
+    result = payments.verify_cashfree_payment({"$ne": None}, 20000)
+    print(f"  - Result: {result}")
+    assert result is False, "A dict passed as order_id was not rejected outright!"
 
     print("\n" + "=" * 70)
     print("  ALL REJECTION-PATH CHECKS PASSED")
-    print("  - Forged signature rejected")
-    print("  - Cross-order signature reuse rejected")
-    print("  - Unpaid order rejected even with a well-formed signature")
+    print("  - Unpaid order rejected")
+    print("  - Unknown order_id rejected")
+    print("  - Non-string/type-confused order_id rejected")
     print("  (Amount-mismatch and replay-protection logic: see")
-    print("   test_payment_verification.py, which mocks a genuinely-'paid' order")
+    print("   test_payment_verification.py, which mocks a genuinely-'PAID' order")
     print("   response to isolate and test that logic without needing a browser.)")
     print("=" * 70)
 

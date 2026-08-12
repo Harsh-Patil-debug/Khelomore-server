@@ -1,6 +1,6 @@
 # test_booking_security.py
 # Regression tests for: booking detail IDOR (update), booking-list IDOR (cafe_id scoped
-# listing), and the payment-integrity fix (server-side price + Razorpay verification).
+# listing), and the payment-integrity fix (server-side price + Cashfree verification).
 
 from bson import ObjectId
 

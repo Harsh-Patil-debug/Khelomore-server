@@ -152,12 +152,12 @@ class RegisterValidationTests(SecurityTestCase):
         # role="admin" to prove is_admin alone is enough to trigger the exemption.
         owner_email = self.unique_email("admin-consent-check")
         self.make_cafe(owner_email=owner_email)
-        enc_gamertag, enc_email, enc_password, enc_rzp, iv = self.encrypt_with_shared_iv(
-            "Owner", owner_email, "CorrectHorseBattery1", "RzpDifferent2"
+        enc_gamertag, enc_email, enc_password, enc_pay_pw, iv = self.encrypt_with_shared_iv(
+            "Owner", owner_email, "CorrectHorseBattery1", "PayDifferent2"
         )
         result, code = auth_handler.bookmyconsole_register(
             enc_gamertag, enc_email, enc_password, iv,
-            phone=None, is_admin=True, role="", razorpay_password=enc_rzp,
+            phone=None, is_admin=True, role="", payment_credentials_password=enc_pay_pw,
         )
         self.assertEqual(code, 200, result)
         admin_doc = self.db.admins.find_one({"email": owner_email})

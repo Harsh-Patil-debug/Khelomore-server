@@ -335,10 +335,10 @@ def map_cafe_doc(doc, user_lat=None, user_lon=None, public=False):
         "subscription_renewal": doc["subscription_due_date"].isoformat() if doc.get("subscription_due_date") else None,
         "subscription_trial_welcome_shown": bool(doc.get("subscription_trial_welcome_shown")),
 
-        # Whether the owner has connected their own Razorpay account for booking
-        # payments. Never expose the actual key_id/secret here — see
-        # get_razorpay_credentials_status_handler for that (owner/super-admin only).
-        "razorpay_configured": bool(doc.get("razorpay_key_id") and doc.get("razorpay_key_secret_enc")),
+        # Whether the owner has connected their own Cashfree account for booking
+        # payments. Never expose the actual client_id/secret here — see
+        # get_cashfree_credentials_status_handler for that (owner/super-admin only).
+        "cashfree_configured": bool(doc.get("cashfree_client_id") and doc.get("cashfree_client_secret_enc")),
     }
 
 
@@ -899,11 +899,11 @@ def get_my_cafes_handler(owner_email, is_super_admin=False):
         }
 
 
-def get_razorpay_credentials_status_handler(cafe_id):
+def get_cashfree_credentials_status_handler(cafe_id):
     """
-    GET-side of the cafe owner's own Razorpay account settings — returns whether it's
-    configured and the (public, safe-to-show) key_id, but NEVER the key_secret. The
-    secret only ever flows one way: in via save_razorpay_credentials_handler, never back
+    GET-side of the cafe owner's own Cashfree account settings — returns whether it's
+    configured and the (public, safe-to-show) client_id, but NEVER the client_secret. The
+    secret only ever flows one way: in via save_cashfree_credentials_handler, never back
     out to any frontend.
     """
     db_main = get_db()
@@ -913,55 +913,55 @@ def get_razorpay_credentials_status_handler(cafe_id):
         doc = db_main.cafes.find_one({"_id": ObjectId(cafe_id)})
         if not doc:
             return {"status": "error", "message": "Cafe not found."}
-        configured = bool(doc.get("razorpay_key_id") and doc.get("razorpay_key_secret_enc"))
+        configured = bool(doc.get("cashfree_client_id") and doc.get("cashfree_client_secret_enc"))
         return {
             "status": "success",
             "configured": configured,
-            "key_id": doc.get("razorpay_key_id") if configured else None,
+            "client_id": doc.get("cashfree_client_id") if configured else None,
         }
     except Exception as e:
-        return {"status": "error", "message": f"Failed to retrieve Razorpay settings: {e}"}
+        return {"status": "error", "message": f"Failed to retrieve Cashfree settings: {e}"}
 
 
-def save_razorpay_credentials_handler(cafe_id, key_id, key_secret):
+def save_cashfree_credentials_handler(cafe_id, client_id, client_secret):
     """
-    Saves the cafe owner's own Razorpay Key ID + Key Secret so their booking payments go
-    straight into their own account instead of the platform's. key_secret is encrypted at
-    rest with the same AES routine already used for TOTP secrets/phone numbers
-    (auth_handler.encrypt_secret_key) — it's never stored or returned in plaintext.
+    Saves the cafe owner's own Cashfree Client ID + Client Secret so their booking
+    payments go straight into their own account instead of the platform's.
+    client_secret is encrypted at rest with the same AES routine already used for TOTP
+    secrets/phone numbers (auth_handler.encrypt_secret_key) — it's never stored or
+    returned in plaintext.
     """
     db_main = get_db()
     if db_main is None:
         return {"status": "error", "message": "MongoDB connection is not established."}
     try:
-        key_id = (key_id or "").strip()
-        key_secret = (key_secret or "").strip()
-        if not key_id or not key_secret:
-            return {"status": "error", "message": "Both Key ID and Key Secret are required."}
-        if not key_id.startswith(("rzp_live_", "rzp_test_")):
-            return {"status": "error", "message": "That doesn't look like a valid Razorpay Key ID."}
+        client_id = (client_id or "").strip()
+        client_secret = (client_secret or "").strip()
+        if not client_id or not client_secret:
+            return {"status": "error", "message": "Both Client ID and Client Secret are required."}
 
         from .auth_handler import encrypt_secret_key, ENCRYPTION_KEY
-        encrypted_secret = encrypt_secret_key(key_secret, ENCRYPTION_KEY)
+        encrypted_secret = encrypt_secret_key(client_secret, ENCRYPTION_KEY)
 
         result = db_main.cafes.update_one(
             {"_id": ObjectId(cafe_id)},
-            {"$set": {"razorpay_key_id": key_id, "razorpay_key_secret_enc": encrypted_secret}},
+            {"$set": {"cashfree_client_id": client_id, "cashfree_client_secret_enc": encrypted_secret}},
         )
         if result.matched_count == 0:
             return {"status": "error", "message": "Cafe not found."}
-        return {"status": "success", "configured": True, "key_id": key_id}
+        return {"status": "success", "configured": True, "client_id": client_id}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to save Razorpay settings: {e}"}
+        return {"status": "error", "message": f"Failed to save Cashfree settings: {e}"}
 
 
-def get_razorpay_password_status_handler(cafe_id, caller_email):
+def get_payment_credentials_password_status_handler(cafe_id, caller_email):
     """
-    GET-side of the second-factor Razorpay password gate: tells the frontend whether to
-    show "enter your Razorpay password to unlock" (already set) or "set a Razorpay
-    password first" (an account that predates this feature, or never finished signup with
-    one). caller_email is the AUTHENTICATED caller — a super admin viewing another
-    owner's cafe always sees is_owner=False and bypasses the gate entirely client-side.
+    GET-side of the second-factor payment-credentials password gate: tells the frontend
+    whether to show "enter your payment password to unlock" (already set) or "set a
+    payment password first" (an account that predates this feature, or never finished
+    signup with one). caller_email is the AUTHENTICATED caller — a super admin viewing
+    another owner's cafe always sees is_owner=False and bypasses the gate entirely
+    client-side.
     """
     db_main = get_db()
     if db_main is None:
@@ -974,18 +974,18 @@ def get_razorpay_password_status_handler(cafe_id, caller_email):
         if not is_owner:
             return {"status": "success", "is_owner": False, "has_password": None}
         admin = db_main.admins.find_one({"email": cafe["owner_email"]})
-        has_password = bool(admin and admin.get("razorpay_password_hash"))
+        has_password = bool(admin and admin.get("payment_credentials_password_hash"))
         return {"status": "success", "is_owner": True, "has_password": has_password}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to check Razorpay password status: {e}"}
+        return {"status": "error", "message": f"Failed to check payment password status: {e}"}
 
 
-def set_razorpay_password_handler(cafe_id, caller_email, new_password):
+def set_payment_credentials_password_handler(cafe_id, caller_email, new_password):
     """
     First-time setup only — for a cafe owner's account that predates this feature (signup
-    never asked for a Razorpay password) or somehow has none. Refuses to overwrite an
+    never asked for a payment password) or somehow has none. Refuses to overwrite an
     existing one; that's a deliberate limitation, not an oversight — there's no "forgot
-    Razorpay password" recovery flow yet, so silently allowing a reset here would be a
+    payment password" recovery flow yet, so silently allowing a reset here would be a
     bypass of the very gate this password exists to enforce.
     """
     db_main = get_db()
@@ -996,7 +996,7 @@ def set_razorpay_password_handler(cafe_id, caller_email, new_password):
         if not cafe:
             return {"status": "error", "message": "Cafe not found."}
         if caller_email != (cafe.get("owner_email") or "").strip().lower():
-            return {"status": "error", "message": "Only this cafe's owner can set its Razorpay password."}
+            return {"status": "error", "message": "Only this cafe's owner can set its payment password."}
 
         from . import input_validation
         pw_error = input_validation.validate_password_strength(new_password or "")
@@ -1011,27 +1011,27 @@ def set_razorpay_password_handler(cafe_id, caller_email, new_password):
             # explicitly rather than letting update_one's no-op-when-no-match behavior
             # report a silent, misleading "success".
             return {"status": "error", "message": "Owner account not found."}
-        if admin.get("razorpay_password_hash"):
-            return {"status": "error", "message": "A Razorpay password is already set for this account."}
+        if admin.get("payment_credentials_password_hash"):
+            return {"status": "error", "message": "A payment password is already set for this account."}
 
         from .auth_handler import ph
         db_main.admins.update_one(
             {"_id": admin["_id"]},
-            {"$set": {"razorpay_password_hash": ph.hash(new_password)}},
+            {"$set": {"payment_credentials_password_hash": ph.hash(new_password)}},
         )
         return {"status": "success"}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to set Razorpay password: {e}"}
+        return {"status": "error", "message": f"Failed to set payment password: {e}"}
 
 
-def forgot_razorpay_password_handler(cafe_id, caller_email):
+def forgot_payment_credentials_password_handler(cafe_id, caller_email):
     """
-    Sends a reset OTP to the cafe owner's own account email, so a forgotten Razorpay
+    Sends a reset OTP to the cafe owner's own account email, so a forgotten payment
     password is no longer a permanent lockout. caller_email must already match this
     cafe's actual owner_email (an active authenticated session as that specific owner) —
     not a super-admin bypass, since the OTP is only meaningful to whoever actually reads
-    that owner's inbox. Uses its own OTP fields (razorpay_reset_*), separate from a
-    regular login-password reset's, so requesting one never disrupts the other.
+    that owner's inbox. Uses its own OTP fields (payment_credentials_reset_*), separate
+    from a regular login-password reset's, so requesting one never disrupts the other.
     """
     db_main = get_db()
     if db_main is None:
@@ -1042,7 +1042,7 @@ def forgot_razorpay_password_handler(cafe_id, caller_email):
             return {"status": "error", "message": "Cafe not found."}
         owner_email = (cafe.get("owner_email") or "").strip().lower()
         if caller_email != owner_email:
-            return {"status": "error", "message": "Only this cafe's owner can reset its Razorpay password."}
+            return {"status": "error", "message": "Only this cafe's owner can reset its payment password."}
 
         admin = db_main.admins.find_one({"email": owner_email})
         if not admin:
@@ -1052,7 +1052,7 @@ def forgot_razorpay_password_handler(cafe_id, caller_email):
         from .auth_handler import IST, OTP_EXPIRY_MINUTES, OTP_RESEND_COOLDOWN_SECONDS
         import random
 
-        prev_expiry = admin.get("razorpay_reset_otp_expiry")
+        prev_expiry = admin.get("payment_credentials_reset_otp_expiry")
         if prev_expiry:
             if prev_expiry.tzinfo is None:
                 prev_expiry = prev_expiry.replace(tzinfo=timezone.utc).astimezone(IST)
@@ -1066,8 +1066,8 @@ def forgot_razorpay_password_handler(cafe_id, caller_email):
         otp_expiry = datetime.now(IST) + timedelta(minutes=OTP_EXPIRY_MINUTES)
         db_main.admins.update_one(
             {"_id": admin["_id"]},
-            {"$set": {"razorpay_reset_otp_code": otp_code, "razorpay_reset_otp_expiry": otp_expiry},
-             "$unset": {"razorpay_reset_otp_attempts": ""}}
+            {"$set": {"payment_credentials_reset_otp_code": otp_code, "payment_credentials_reset_otp_expiry": otp_expiry},
+             "$unset": {"payment_credentials_reset_otp_attempts": ""}}
         )
         gamertag = admin.get("gamertag") or "PLAYER"
         from .email_handler import send_otp_email
@@ -1077,9 +1077,10 @@ def forgot_razorpay_password_handler(cafe_id, caller_email):
         return {"status": "error", "message": f"Failed to send reset code: {e}"}
 
 
-def reset_razorpay_password_handler(cafe_id, caller_email, otp_code, new_password):
-    """Verifies the razorpay_reset OTP and sets a new Razorpay password, overwriting any
-    existing one — the actual recovery step forgot_razorpay_password_handler sets up."""
+def reset_payment_credentials_password_handler(cafe_id, caller_email, otp_code, new_password):
+    """Verifies the payment_credentials_reset OTP and sets a new payment password,
+    overwriting any existing one — the actual recovery step
+    forgot_payment_credentials_password_handler sets up."""
     db_main = get_db()
     if db_main is None:
         return {"status": "error", "message": "MongoDB connection is not established."}
@@ -1089,7 +1090,7 @@ def reset_razorpay_password_handler(cafe_id, caller_email, otp_code, new_passwor
             return {"status": "error", "message": "Cafe not found."}
         owner_email = (cafe.get("owner_email") or "").strip().lower()
         if caller_email != owner_email:
-            return {"status": "error", "message": "Only this cafe's owner can reset its Razorpay password."}
+            return {"status": "error", "message": "Only this cafe's owner can reset its payment password."}
 
         from . import input_validation
         pw_error = input_validation.validate_password_strength(new_password or "")
@@ -1100,8 +1101,8 @@ def reset_razorpay_password_handler(cafe_id, caller_email, otp_code, new_passwor
         if not admin:
             return {"status": "error", "message": "Owner account not found."}
 
-        stored_otp = admin.get("razorpay_reset_otp_code")
-        otp_exp = admin.get("razorpay_reset_otp_expiry")
+        stored_otp = admin.get("payment_credentials_reset_otp_code")
+        otp_exp = admin.get("payment_credentials_reset_otp_expiry")
         if not stored_otp or not otp_exp:
             return {"status": "error", "message": "No reset request found. Please request a new code."}
 
@@ -1113,32 +1114,32 @@ def reset_razorpay_password_handler(cafe_id, caller_email, otp_code, new_passwor
             return {"status": "error", "message": "Reset code has expired. Please request a new one."}
 
         if stored_otp != (otp_code or "").strip():
-            attempts = int(admin.get("razorpay_reset_otp_attempts", 0)) + 1
+            attempts = int(admin.get("payment_credentials_reset_otp_attempts", 0)) + 1
             if attempts >= MAX_OTP_ATTEMPTS:
                 db_main.admins.update_one(
                     {"_id": admin["_id"]},
-                    {"$unset": {"razorpay_reset_otp_code": "", "razorpay_reset_otp_expiry": "", "razorpay_reset_otp_attempts": ""}}
+                    {"$unset": {"payment_credentials_reset_otp_code": "", "payment_credentials_reset_otp_expiry": "", "payment_credentials_reset_otp_attempts": ""}}
                 )
                 return {"status": "error", "message": "Too many incorrect attempts. Please request a new code."}
-            db_main.admins.update_one({"_id": admin["_id"]}, {"$set": {"razorpay_reset_otp_attempts": attempts}})
+            db_main.admins.update_one({"_id": admin["_id"]}, {"$set": {"payment_credentials_reset_otp_attempts": attempts}})
             return {"status": "error", "message": "Invalid reset code."}
 
         db_main.admins.update_one(
             {"_id": admin["_id"]},
             {
-                "$set": {"razorpay_password_hash": ph.hash(new_password)},
+                "$set": {"payment_credentials_password_hash": ph.hash(new_password)},
                 "$unset": {
-                    "razorpay_reset_otp_code": "", "razorpay_reset_otp_expiry": "", "razorpay_reset_otp_attempts": "",
-                    "razorpay_password_locked_until": "", "razorpay_password_attempts": "",
+                    "payment_credentials_reset_otp_code": "", "payment_credentials_reset_otp_expiry": "", "payment_credentials_reset_otp_attempts": "",
+                    "payment_credentials_password_locked_until": "", "payment_credentials_password_attempts": "",
                 },
             },
         )
-        return {"status": "success", "message": "Razorpay password reset successfully."}
+        return {"status": "success", "message": "Payment password reset successfully."}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to reset Razorpay password: {e}"}
+        return {"status": "error", "message": f"Failed to reset payment password: {e}"}
 
 
-def verify_razorpay_password_handler(cafe_id, caller_email, password):
+def verify_payment_credentials_password_handler(cafe_id, caller_email, password):
     """
     The actual unlock check. A super admin viewing someone else's cafe (caller_email !=
     the cafe's own owner_email) bypasses this entirely — they already passed the stronger
@@ -1164,49 +1165,49 @@ def verify_razorpay_password_handler(cafe_id, caller_email, password):
         from .auth_handler import verify_password, ph, IST, MAX_LOGIN_ATTEMPTS, LOGIN_LOCKOUT_MINUTES
 
         admin = db_main.admins.find_one({"email": owner_email})
-        if not admin or not admin.get("razorpay_password_hash"):
-            return {"status": "error", "needs_setup": True, "message": "No Razorpay password set yet for this account."}
+        if not admin or not admin.get("payment_credentials_password_hash"):
+            return {"status": "error", "needs_setup": True, "message": "No payment password set yet for this account."}
 
-        locked_until = admin.get("razorpay_password_locked_until")
+        locked_until = admin.get("payment_credentials_password_locked_until")
         if locked_until:
             if locked_until.tzinfo is None:
                 locked_until = locked_until.replace(tzinfo=timezone.utc).astimezone(IST)
             if datetime.now(IST) < locked_until:
                 return {"status": "error", "message": "Too many incorrect attempts. Please try again later."}
 
-        if not verify_password(admin["razorpay_password_hash"], password or ""):
-            attempts = int(admin.get("razorpay_password_attempts", 0)) + 1
-            update_fields: dict = {"razorpay_password_attempts": attempts}
+        if not verify_password(admin["payment_credentials_password_hash"], password or ""):
+            attempts = int(admin.get("payment_credentials_password_attempts", 0)) + 1
+            update_fields: dict = {"payment_credentials_password_attempts": attempts}
             if attempts >= MAX_LOGIN_ATTEMPTS:
-                update_fields["razorpay_password_locked_until"] = datetime.now(IST) + timedelta(minutes=LOGIN_LOCKOUT_MINUTES)
+                update_fields["payment_credentials_password_locked_until"] = datetime.now(IST) + timedelta(minutes=LOGIN_LOCKOUT_MINUTES)
             db_main.admins.update_one({"_id": admin["_id"]}, {"$set": update_fields})
-            return {"status": "error", "message": "Incorrect Razorpay password."}
+            return {"status": "error", "message": "Incorrect payment password."}
 
-        if admin.get("razorpay_password_attempts") or admin.get("razorpay_password_locked_until"):
+        if admin.get("payment_credentials_password_attempts") or admin.get("payment_credentials_password_locked_until"):
             db_main.admins.update_one(
                 {"_id": admin["_id"]},
-                {"$unset": {"razorpay_password_attempts": "", "razorpay_password_locked_until": ""}},
+                {"$unset": {"payment_credentials_password_attempts": "", "payment_credentials_password_locked_until": ""}},
             )
         return {"status": "success", "verified": True}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to verify Razorpay password: {e}"}
+        return {"status": "error", "message": f"Failed to verify payment password: {e}"}
 
 
-def delete_razorpay_credentials_handler(cafe_id):
-    """Disconnects the cafe's own Razorpay account — booking payments fall back to the platform account again."""
+def delete_cashfree_credentials_handler(cafe_id):
+    """Disconnects the cafe's own Cashfree account — booking payments fall back to the platform account again."""
     db_main = get_db()
     if db_main is None:
         return {"status": "error", "message": "MongoDB connection is not established."}
     try:
         result = db_main.cafes.update_one(
             {"_id": ObjectId(cafe_id)},
-            {"$unset": {"razorpay_key_id": "", "razorpay_key_secret_enc": ""}},
+            {"$unset": {"cashfree_client_id": "", "cashfree_client_secret_enc": ""}},
         )
         if result.matched_count == 0:
             return {"status": "error", "message": "Cafe not found."}
         return {"status": "success", "configured": False}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to disconnect Razorpay: {e}"}
+        return {"status": "error", "message": f"Failed to disconnect Cashfree: {e}"}
 
 
 def delete_cafe_handler(cafe_id):

@@ -12,7 +12,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.throttling import ScopedRateThrottle
-from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, auth_handler, bookings_handler, auth_middleware, favorites, sessions, offers, users, partner_applications, subscriptions, notifications, support
+from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, payouts, auth_handler, bookings_handler, auth_middleware, favorites, sessions, offers, users, partner_applications, subscriptions, notifications, support
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
@@ -197,7 +197,7 @@ class BookMyConsoleRegisterView(APIView):
             phone             = data.get("phone", ""),
             is_admin          = check_is_admin(request),
             role              = role,
-            razorpay_password = data.get("razorpay_password", ""),
+            payment_credentials_password = data.get("payment_credentials_password", ""),
             # Website sends a native JSON boolean; the mobile app's apiPost only accepts
             # Record<string, string> bodies and sends the string "true"/"false" instead —
             # `bool("false")` is truthy in Python, so a plain bool() cast here would silently
@@ -705,10 +705,8 @@ class BookingListCreateView(APIView):
             user_phone          = data.get("customerPhone") or data.get("customer_phone") or data.get("userPhone") or data.get("user_phone") or "",
             # SECURITY: price and payment_status are computed/verified server-side (see
             # bookings_handler.create_booking_handler) — a client can no longer dictate them.
-            # The client must complete Razorpay checkout first and pass the resulting IDs here.
-            razorpay_order_id   = data.get("razorpay_order_id"),
-            razorpay_payment_id = data.get("razorpay_payment_id"),
-            razorpay_signature  = data.get("razorpay_signature"),
+            # The client must complete Cashfree checkout first and pass the resulting order id here.
+            cashfree_order_id   = data.get("cashfree_order_id"),
         )
         return Response(result, status=status_code)
 
@@ -1009,7 +1007,7 @@ class CafeSubscriptionDetailView(APIView):
 
 
 class CafeSubscriptionOrderView(APIView):
-    """POST /cafes/<cafe_id>/subscription/create-order/ — Create a ₹1599 Razorpay order for this cafe's next payment."""
+    """POST /cafes/<cafe_id>/subscription/create-order/ — Create a ₹1599 Cashfree order for this cafe's next payment."""
     def post(self, request, cafe_id):
         # allow_when_suspended: this IS the recovery path — a suspended owner must be
         # able to create a payment order to pay their way back in.
@@ -1031,7 +1029,7 @@ class CafeSubscriptionTrialWelcomeShownView(APIView):
 
 
 class CafeSubscriptionVerifyView(APIView):
-    """POST /cafes/<cafe_id>/subscription/verify/ — Verify the Razorpay payment and extend the due date."""
+    """POST /cafes/<cafe_id>/subscription/verify/ — Verify the Cashfree payment and extend the due date."""
     def post(self, request, cafe_id):
         # allow_when_suspended: verifying the payment that lifts the suspension must
         # itself work while still suspended, or paying could never actually unlock them.
@@ -1041,24 +1039,22 @@ class CafeSubscriptionVerifyView(APIView):
         data = request.data
         response, status_code = subscriptions.verify_subscription_payment_handler(
             cafe_id,
-            data.get("razorpay_order_id", ""),
-            data.get("razorpay_payment_id", ""),
-            data.get("razorpay_signature", ""),
+            data.get("cashfree_order_id", ""),
         )
         return Response(response, status=status_code)
 
 
-class CafeRazorpayCredentialsView(APIView):
+class CafeCashfreeCredentialsView(APIView):
     """
-    GET/PUT/DELETE /cafes/<cafe_id>/razorpay-credentials/ — the cafe owner's own Razorpay
+    GET/PUT/DELETE /cafes/<cafe_id>/payment-credentials/ — the cafe owner's own Cashfree
     account for booking payments (owner or super admin only). PUT never echoes the secret
-    back; GET only ever returns whether it's configured + the key_id.
+    back; GET only ever returns whether it's configured + the client_id.
     """
     def get(self, request, cafe_id):
         email, error_response = authenticate_admin_owner(request, cafe_id)
         if error_response:
             return error_response
-        response = cafes.get_razorpay_credentials_status_handler(cafe_id)
+        response = cafes.get_cashfree_credentials_status_handler(cafe_id)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)
@@ -1068,15 +1064,15 @@ class CafeRazorpayCredentialsView(APIView):
         if error_response:
             return error_response
         data = request.data
-        # SECURITY: the "locked until you enter your Razorpay password" gate in
+        # SECURITY: the "locked until you enter your payment password" gate in
         # cafe-command-center is only real if the save itself re-checks it — otherwise
         # it's a UI nicety a direct API call bypasses entirely. Same password gate as
-        # CafeRazorpayPasswordVerifyView below.
-        gate = cafes.verify_razorpay_password_handler(cafe_id, (email or "").strip().lower(), data.get("razorpay_password", ""))
+        # CafePaymentPasswordVerifyView below.
+        gate = cafes.verify_payment_credentials_password_handler(cafe_id, (email or "").strip().lower(), data.get("payment_password", ""))
         if gate.get("status") == "error":
             return Response(gate, status=status.HTTP_403_FORBIDDEN)
-        response = cafes.save_razorpay_credentials_handler(
-            cafe_id, data.get("key_id"), data.get("key_secret")
+        response = cafes.save_cashfree_credentials_handler(
+            cafe_id, data.get("client_id"), data.get("client_secret")
         )
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
@@ -1087,29 +1083,29 @@ class CafeRazorpayCredentialsView(APIView):
         if error_response:
             return error_response
         data = request.data
-        gate = cafes.verify_razorpay_password_handler(cafe_id, (email or "").strip().lower(), data.get("razorpay_password", ""))
+        gate = cafes.verify_payment_credentials_password_handler(cafe_id, (email or "").strip().lower(), data.get("payment_password", ""))
         if gate.get("status") == "error":
             return Response(gate, status=status.HTTP_403_FORBIDDEN)
-        response = cafes.delete_razorpay_credentials_handler(cafe_id)
+        response = cafes.delete_cashfree_credentials_handler(cafe_id)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)
 
 
-class CafeRazorpayPasswordStatusView(APIView):
-    """GET /cafes/<cafe_id>/razorpay-credentials/password-status/ — whether the owner has set a Razorpay password yet."""
+class CafePaymentPasswordStatusView(APIView):
+    """GET /cafes/<cafe_id>/payment-credentials/password-status/ — whether the owner has set a payment password yet."""
     def get(self, request, cafe_id):
         email, error_response = authenticate_admin_owner(request, cafe_id)
         if error_response:
             return error_response
-        response = cafes.get_razorpay_password_status_handler(cafe_id, (email or "").strip().lower())
+        response = cafes.get_payment_credentials_password_status_handler(cafe_id, (email or "").strip().lower())
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)
 
 
-class CafeRazorpayPasswordSetView(APIView):
-    """POST /cafes/<cafe_id>/razorpay-credentials/set-password/ — first-time-only setup for an account that predates this feature."""
+class CafePaymentPasswordSetView(APIView):
+    """POST /cafes/<cafe_id>/payment-credentials/set-password/ — first-time-only setup for an account that predates this feature."""
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth"
 
@@ -1117,14 +1113,14 @@ class CafeRazorpayPasswordSetView(APIView):
         email, error_response = authenticate_admin_owner(request, cafe_id)
         if error_response:
             return error_response
-        response = cafes.set_razorpay_password_handler(cafe_id, (email or "").strip().lower(), request.data.get("password", ""))
+        response = cafes.set_payment_credentials_password_handler(cafe_id, (email or "").strip().lower(), request.data.get("password", ""))
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)
 
 
-class CafeRazorpayPasswordForgotView(APIView):
-    """POST /cafes/<cafe_id>/razorpay-credentials/forgot-password/ — emails a reset OTP to the owner's own account email."""
+class CafePaymentPasswordForgotView(APIView):
+    """POST /cafes/<cafe_id>/payment-credentials/forgot-password/ — emails a reset OTP to the owner's own account email."""
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth"
 
@@ -1132,14 +1128,14 @@ class CafeRazorpayPasswordForgotView(APIView):
         email, error_response = authenticate_admin_owner(request, cafe_id)
         if error_response:
             return error_response
-        response = cafes.forgot_razorpay_password_handler(cafe_id, (email or "").strip().lower())
+        response = cafes.forgot_payment_credentials_password_handler(cafe_id, (email or "").strip().lower())
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)
 
 
-class CafeRazorpayPasswordResetView(APIView):
-    """POST /cafes/<cafe_id>/razorpay-credentials/reset-password/ — verifies the reset OTP and sets a new Razorpay password."""
+class CafePaymentPasswordResetView(APIView):
+    """POST /cafes/<cafe_id>/payment-credentials/reset-password/ — verifies the reset OTP and sets a new payment password."""
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth"
 
@@ -1147,7 +1143,7 @@ class CafeRazorpayPasswordResetView(APIView):
         email, error_response = authenticate_admin_owner(request, cafe_id)
         if error_response:
             return error_response
-        response = cafes.reset_razorpay_password_handler(
+        response = cafes.reset_payment_credentials_password_handler(
             cafe_id,
             (email or "").strip().lower(),
             request.data.get("otp_code", ""),
@@ -1158,8 +1154,8 @@ class CafeRazorpayPasswordResetView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
 
-class CafeRazorpayPasswordVerifyView(APIView):
-    """POST /cafes/<cafe_id>/razorpay-credentials/verify-password/ — unlocks the credential fields in the UI."""
+class CafePaymentPasswordVerifyView(APIView):
+    """POST /cafes/<cafe_id>/payment-credentials/verify-password/ — unlocks the credential fields in the UI."""
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth"
 
@@ -1167,7 +1163,7 @@ class CafeRazorpayPasswordVerifyView(APIView):
         email, error_response = authenticate_admin_owner(request, cafe_id)
         if error_response:
             return error_response
-        response = cafes.verify_razorpay_password_handler(cafe_id, (email or "").strip().lower(), request.data.get("password", ""))
+        response = cafes.verify_payment_credentials_password_handler(cafe_id, (email or "").strip().lower(), request.data.get("password", ""))
         if response.get("status") == "error":
             error_status = status.HTTP_400_BAD_REQUEST if response.get("needs_setup") else status.HTTP_403_FORBIDDEN
             return Response(response, status=error_status)
@@ -1176,9 +1172,9 @@ class CafeRazorpayPasswordVerifyView(APIView):
 
 class CafeBookingOrderCreateView(APIView):
     """
-    POST /cafes/<cafe_id>/payments/create-order/ — Create a Razorpay order for any
+    POST /cafes/<cafe_id>/payments/create-order/ — Create a Cashfree order for any
     customer-facing payment at this specific cafe (slot booking, paid tournament entry),
-    routed to the cafe owner's own Razorpay account if they've configured one, or the
+    routed to the cafe owner's own Cashfree account if they've configured one, or the
     platform account as a fallback. Called by the customer (any logged-in user), not the
     cafe owner — unlike the other cafes/<id>/... endpoints above.
     """
@@ -1221,6 +1217,47 @@ class CafeBookingReleaseHoldView(APIView):
             return Response({"status": "error", "message": "Missing 'order_id' parameter"}, status=status.HTTP_400_BAD_REQUEST)
         payments.release_cafe_booking_hold(cafe_id, order_id)
         return Response({"status": "success"}, status=status.HTTP_200_OK)
+
+
+class CafePayoutBeneficiaryView(APIView):
+    """
+    POST /cafes/<cafe_id>/payouts/beneficiary/ — Registers/updates the cafe's settlement
+    bank account with Cashfree Payouts (owner or super admin only). Called from
+    cafe-command-center when the owner enters their bank details.
+    """
+    def post(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        data = request.data
+        response = payouts.create_cafe_beneficiary_handler(
+            cafe_id,
+            data.get("beneficiary_name"),
+            data.get("bank_account_number"),
+            data.get("ifsc"),
+            email=data.get("email"),
+            phone=data.get("phone"),
+        )
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class CafePayoutSettleView(APIView):
+    """
+    POST /cafes/<cafe_id>/payouts/settle/ — Super-admin-only. Pays out this cafe's
+    accumulated platform-collected earnings (bookings paid via the platform fallback
+    account) to their registered bank account in one batch. See payouts.py for why this
+    is a manual, admin-triggered action rather than an automated cron job.
+    """
+    def post(self, request, cafe_id):
+        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        if error_response:
+            return error_response
+        response = payouts.settle_pending_payouts_for_cafe_handler(cafe_id, triggered_by=email)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
 
 
 class SubscriptionsListView(APIView):
@@ -1269,8 +1306,8 @@ class BookingDetailView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
 
-class RazorpayOrderCreateView(APIView):
-    """POST /payments/create-order/ — Create a Razorpay Order"""
+class CashfreeOrderCreateView(APIView):
+    """POST /payments/create-order/ — Create a Cashfree Order (platform account; used when there's no cafe association)"""
     def post(self, request):
         email, error_response = auth_middleware.authenticate_request(request)
         if error_response:
@@ -1279,8 +1316,7 @@ class RazorpayOrderCreateView(APIView):
         amount = request.data.get("amount")
         if amount is None:
             return Response({"status": "error", "message": "Missing 'amount' parameter"}, status=status.HTTP_400_BAD_REQUEST)
-        response = payments.create_razorpay_order_handler(amount)
-        response["key_id"] = getattr(settings, 'RAZORPAY_KEY_ID', '')
+        response = payments.create_cashfree_order_handler(amount, customer_email=email)
         return Response(response, status=status.HTTP_200_OK)
 
 

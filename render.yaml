@@ -36,9 +36,15 @@ services:
         sync: false
       - key: ADMIN_TOKEN
         sync: false
-      - key: RAZORPAY_KEY_ID
+      - key: CASHFREE_CLIENT_ID
         sync: false
-      - key: RAZORPAY_KEY_SECRET
+      - key: CASHFREE_CLIENT_SECRET
+        sync: false
+      - key: CASHFREE_ENV
+        sync: false
+      - key: CASHFREE_PAYOUTS_CLIENT_ID
+        sync: false
+      - key: CASHFREE_PAYOUTS_CLIENT_SECRET
         sync: false
       - key: CLOUDINARY_CLOUD_NAME
         sync: false

@@ -1,6 +1,6 @@
 # test_cafe_razorpay.py
-# Regression tests for per-cafe Razorpay routing: a cafe owner can connect their own
-# Razorpay account so booking payments go straight to them instead of the platform's
+# Regression tests for per-cafe Cashfree routing: a cafe owner can connect their own
+# Cashfree account so booking payments go straight to them instead of the platform's
 # account; cafes that haven't configured one yet fall back to the platform account
 # (flagged for manual settlement later, per product decision); and an order created for
 # one cafe can never be replayed to pay for a booking at a different cafe.
@@ -8,52 +8,58 @@
 import uuid
 from unittest.mock import MagicMock, patch
 
-from django.conf import settings
+from django.test import override_settings
 
 from ..Handlers import payments
 from ..Handlers.db_connection import get_db
 from .base import SecurityTestCase
 
 
-RZP_TEST_PASSWORD = "MyRzpPassword123"
+CF_TEST_PASSWORD = "MyCfPassword123"
 
 
-def _connect_owner_credentials(test_case, cafe_id, token, key_id="rzp_test_ownerkey123", key_secret="supersecretvalue"):
-    """Sets the owner's Razorpay password (first-time setup) and connects their own
-    Razorpay account in one step — every test that needs a cafe to already have its own
+def _connect_owner_credentials(test_case, cafe_id, token, client_id="cf_test_ownerkey123", client_secret="supersecretvalue"):
+    """Sets the owner's payment password (first-time setup) and connects their own
+    Cashfree account in one step — every test that needs a cafe to already have its own
     credentials configured goes through this, since the save endpoint requires the
-    password gate to be satisfied (see CafeRazorpayCredentialsView.put)."""
+    password gate to be satisfied (see CafeCashfreeCredentialsView.put)."""
     test_case.client.post(
-        f"/api/v1/main/cafes/{cafe_id}/razorpay-credentials/set-password/",
-        {"password": RZP_TEST_PASSWORD},
+        f"/api/v1/main/cafes/{cafe_id}/payment-credentials/set-password/",
+        {"password": CF_TEST_PASSWORD},
         format="json",
         **test_case.auth_header(token),
     )
     return test_case.client.put(
-        f"/api/v1/main/cafes/{cafe_id}/razorpay-credentials/",
-        {"key_id": key_id, "key_secret": key_secret, "razorpay_password": RZP_TEST_PASSWORD},
+        f"/api/v1/main/cafes/{cafe_id}/payment-credentials/",
+        {"client_id": client_id, "client_secret": client_secret, "payment_password": CF_TEST_PASSWORD},
         format="json",
         **test_case.auth_header(token),
     )
 
 
-def _mock_razorpay_client(order_amount, order_status="paid", signature_valid=True):
-    mock_client = MagicMock()
-    if signature_valid:
-        mock_client.utility.verify_payment_signature.return_value = True
-    else:
-        import razorpay.errors
-        mock_client.utility.verify_payment_signature.side_effect = razorpay.errors.SignatureVerificationError("bad sig")
-    mock_client.order.fetch.return_value = {"amount": order_amount, "status": order_status}
-    mock_client.order.create.return_value = {
-        "id": f"order_test_{uuid.uuid4().hex[:12]}",
-        "amount": order_amount,
-        "status": "created",
+def _mock_cashfree_responses(order_amount, order_status="PAID"):
+    """Returns (mock_post, mock_get) suitable for @patch("requests.post")/@patch("requests.get")
+    — post covers order creation, get covers the order-status verification lookup."""
+    order_id = f"order_test_{uuid.uuid4().hex[:12]}"
+
+    mock_post_response = MagicMock()
+    mock_post_response.raise_for_status.return_value = None
+    mock_post_response.json.return_value = {
+        "order_id": order_id,
+        "order_amount": order_amount,
+        "order_status": "ACTIVE",
+        "payment_session_id": f"session_test_{uuid.uuid4().hex[:12]}",
     }
-    return mock_client
+
+    mock_get_response = MagicMock()
+    mock_get_response.raise_for_status.return_value = None
+    mock_get_response.json.return_value = {"order_amount": order_amount, "order_status": order_status}
+
+    return mock_post_response, mock_get_response
 
 
-class CafeRazorpayCredentialsTests(SecurityTestCase):
+@override_settings(CASHFREE_CLIENT_ID="platform_test_client_id", CASHFREE_CLIENT_SECRET="platform_test_secret")
+class CafeCashfreeCredentialsTests(SecurityTestCase):
     def setUp(self):
         super().setUp()
         self.owner_email, self.owner_token = self.make_active_user(role="admin", collection="admins")
@@ -61,7 +67,7 @@ class CafeRazorpayCredentialsTests(SecurityTestCase):
 
     def test_starts_unconfigured(self):
         resp = self.client.get(
-            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/", **self.auth_header(self.owner_token)
+            f"/api/v1/main/cafes/{self.cafe_id}/payment-credentials/", **self.auth_header(self.owner_token)
         )
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.json()["configured"])
@@ -70,21 +76,21 @@ class CafeRazorpayCredentialsTests(SecurityTestCase):
         resp = _connect_owner_credentials(self, self.cafe_id, self.owner_token)
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.json()["configured"])
-        self.assertEqual(resp.json()["key_id"], "rzp_test_ownerkey123")
+        self.assertEqual(resp.json()["client_id"], "cf_test_ownerkey123")
 
         status_resp = self.client.get(
-            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/", **self.auth_header(self.owner_token)
+            f"/api/v1/main/cafes/{self.cafe_id}/payment-credentials/", **self.auth_header(self.owner_token)
         )
         self.assertTrue(status_resp.json()["configured"])
-        self.assertEqual(status_resp.json()["key_id"], "rzp_test_ownerkey123")
+        self.assertEqual(status_resp.json()["client_id"], "cf_test_ownerkey123")
 
-    def test_key_secret_is_never_echoed_back(self):
+    def test_client_secret_is_never_echoed_back(self):
         connect_resp = _connect_owner_credentials(self, self.cafe_id, self.owner_token)
         self.assertEqual(connect_resp.status_code, 200)
         status_resp = self.client.get(
-            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/", **self.auth_header(self.owner_token)
+            f"/api/v1/main/cafes/{self.cafe_id}/payment-credentials/", **self.auth_header(self.owner_token)
         )
-        self.assertNotIn("key_secret", status_resp.json())
+        self.assertNotIn("client_secret", status_resp.json())
         self.assertNotIn("supersecretvalue", str(status_resp.json()))
 
     def test_secret_is_encrypted_at_rest_not_stored_plaintext(self):
@@ -92,19 +98,19 @@ class CafeRazorpayCredentialsTests(SecurityTestCase):
         self.assertEqual(connect_resp.status_code, 200)
         from bson import ObjectId
         doc = self.db.cafes.find_one({"_id": ObjectId(self.cafe_id)})
-        self.assertNotEqual(doc["razorpay_key_secret_enc"], "supersecretvalue")
-        self.assertNotIn("supersecretvalue", doc["razorpay_key_secret_enc"])
+        self.assertNotEqual(doc["cashfree_client_secret_enc"], "supersecretvalue")
+        self.assertNotIn("supersecretvalue", doc["cashfree_client_secret_enc"])
 
-    def test_invalid_key_id_format_is_rejected(self):
+    def test_missing_client_secret_is_rejected(self):
         self.client.post(
-            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/set-password/",
-            {"password": RZP_TEST_PASSWORD},
+            f"/api/v1/main/cafes/{self.cafe_id}/payment-credentials/set-password/",
+            {"password": CF_TEST_PASSWORD},
             format="json",
             **self.auth_header(self.owner_token),
         )
         resp = self.client.put(
-            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/",
-            {"key_id": "not-a-real-key", "key_secret": "supersecretvalue", "razorpay_password": RZP_TEST_PASSWORD},
+            f"/api/v1/main/cafes/{self.cafe_id}/payment-credentials/",
+            {"client_id": "cf_test_incomplete", "client_secret": "", "payment_password": CF_TEST_PASSWORD},
             format="json",
             **self.auth_header(self.owner_token),
         )
@@ -115,8 +121,8 @@ class CafeRazorpayCredentialsTests(SecurityTestCase):
         self.make_cafe(owner_email=attacker_email)
 
         resp = self.client.put(
-            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/",
-            {"key_id": "rzp_test_attacker", "key_secret": "hijack"},
+            f"/api/v1/main/cafes/{self.cafe_id}/payment-credentials/",
+            {"client_id": "cf_test_attacker", "client_secret": "hijack"},
             format="json",
             **self.auth_header(attacker_token),
         )
@@ -126,8 +132,8 @@ class CafeRazorpayCredentialsTests(SecurityTestCase):
         connect_resp = _connect_owner_credentials(self, self.cafe_id, self.owner_token)
         self.assertEqual(connect_resp.status_code, 200)
         resp = self.client.delete(
-            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/",
-            {"razorpay_password": RZP_TEST_PASSWORD},
+            f"/api/v1/main/cafes/{self.cafe_id}/payment-credentials/",
+            {"payment_password": CF_TEST_PASSWORD},
             format="json",
             **self.auth_header(self.owner_token),
         )
@@ -138,11 +144,12 @@ class CafeRazorpayCredentialsTests(SecurityTestCase):
         connect_resp = _connect_owner_credentials(self, self.cafe_id, self.owner_token)
         self.assertEqual(connect_resp.status_code, 200)
         resp = self.client.delete(
-            f"/api/v1/main/cafes/{self.cafe_id}/razorpay-credentials/", **self.auth_header(self.owner_token)
+            f"/api/v1/main/cafes/{self.cafe_id}/payment-credentials/", **self.auth_header(self.owner_token)
         )
         self.assertEqual(resp.status_code, 403)
 
 
+@override_settings(CASHFREE_CLIENT_ID="platform_test_client_id", CASHFREE_CLIENT_SECRET="platform_test_secret")
 class CafeBookingOrderCreationTests(SecurityTestCase):
     def setUp(self):
         super().setUp()
@@ -154,9 +161,9 @@ class CafeBookingOrderCreationTests(SecurityTestCase):
         super().tearDown()
         self.db.cafe_payment_orders.delete_many({"cafe_id": self.cafe_id})
 
-    @patch("razorpay.Client")
-    def test_unconfigured_cafe_falls_back_to_platform_account(self, mock_client_cls):
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=20000)
+    @patch("requests.post")
+    def test_unconfigured_cafe_falls_back_to_platform_account(self, mock_post):
+        mock_post.return_value, _ = _mock_cashfree_responses(order_amount=200)
         resp = self.client.post(
             f"/api/v1/main/cafes/{self.cafe_id}/payments/create-order/",
             {"amount": 200},
@@ -166,11 +173,10 @@ class CafeBookingOrderCreationTests(SecurityTestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertTrue(body["used_platform_fallback"])
-        self.assertEqual(body["key_id"], settings.RAZORPAY_KEY_ID)
 
-    @patch("razorpay.Client")
-    def test_configured_cafe_uses_its_own_key_id(self, mock_client_cls):
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=20000)
+    @patch("requests.post")
+    def test_configured_cafe_routes_to_its_own_account(self, mock_post):
+        mock_post.return_value, _ = _mock_cashfree_responses(order_amount=200)
         connect_resp = _connect_owner_credentials(self, self.cafe_id, self.owner_token)
         self.assertEqual(connect_resp.status_code, 200)
         resp = self.client.post(
@@ -182,7 +188,10 @@ class CafeBookingOrderCreationTests(SecurityTestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertFalse(body["used_platform_fallback"])
-        self.assertEqual(body["key_id"], "rzp_test_ownerkey123")
+        # The actual x-client-id used for the (mocked) Cashfree call is whatever
+        # get_cafe_cashfree_credentials resolved — asserted indirectly via
+        # used_platform_fallback above; the call itself is mocked so there's no live
+        # credential value to assert on here.
 
     def test_requires_login(self):
         resp = self.client.post(
@@ -191,8 +200,9 @@ class CafeBookingOrderCreationTests(SecurityTestCase):
         self.assertEqual(resp.status_code, 401)
 
 
+@override_settings(CASHFREE_CLIENT_ID="platform_test_client_id", CASHFREE_CLIENT_SECRET="platform_test_secret")
 class CafeBookingPaymentVerificationTests(SecurityTestCase):
-    """Exercises payments.verify_razorpay_payment(cafe_id=...) directly — the HTTP-level
+    """Exercises payments.verify_cashfree_payment(cafe_id=...) directly — the HTTP-level
     booking-creation flow is already covered end-to-end by test_booking_security.py; this
     focuses on the new cafe-routing logic itself."""
 
@@ -206,56 +216,49 @@ class CafeBookingPaymentVerificationTests(SecurityTestCase):
     def tearDown(self):
         super().tearDown()
         self.db.cafe_payment_orders.delete_many({"cafe_id": {"$in": [self.cafe_id, self.other_cafe_id]}})
-        get_db().used_razorpay_payments.delete_many({"order_id": {"$regex": "^order_test_"}})
+        get_db().used_cashfree_payments.delete_many({"order_id": {"$regex": "^order_test_"}})
 
-    @patch("razorpay.Client")
-    def test_platform_fallback_order_verifies_successfully(self, mock_client_cls):
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=20000)
+    @patch("requests.get")
+    @patch("requests.post")
+    def test_platform_fallback_order_verifies_successfully(self, mock_post, mock_get):
+        mock_post.return_value, mock_get.return_value = _mock_cashfree_responses(order_amount=200)
         order = payments.create_cafe_booking_order_handler(self.cafe_id, 200)
         self.assertTrue(order["used_platform_fallback"])
 
-        payment_id = f"pay_test_{uuid.uuid4().hex[:10]}"
-        result = payments.verify_razorpay_payment(
-            order["id"], payment_id, "irrelevant-mocked", 20000, cafe_id=self.cafe_id
-        )
+        result = payments.verify_cashfree_payment(order["order_id"], 20000, cafe_id=self.cafe_id)
         self.assertTrue(result)
 
-    @patch("razorpay.Client")
-    def test_cafes_own_account_order_verifies_successfully(self, mock_client_cls):
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=20000)
+    @patch("requests.get")
+    @patch("requests.post")
+    def test_cafes_own_account_order_verifies_successfully(self, mock_post, mock_get):
+        mock_post.return_value, mock_get.return_value = _mock_cashfree_responses(order_amount=200)
         connect_resp = _connect_owner_credentials(self, self.cafe_id, self.owner_token)
         self.assertEqual(connect_resp.status_code, 200)
         order = payments.create_cafe_booking_order_handler(self.cafe_id, 200)
         self.assertFalse(order["used_platform_fallback"])
 
-        payment_id = f"pay_test_{uuid.uuid4().hex[:10]}"
-        result = payments.verify_razorpay_payment(
-            order["id"], payment_id, "irrelevant-mocked", 20000, cafe_id=self.cafe_id
-        )
+        result = payments.verify_cashfree_payment(order["order_id"], 20000, cafe_id=self.cafe_id)
         self.assertTrue(result)
 
-    @patch("razorpay.Client")
-    def test_order_from_one_cafe_cannot_pay_for_a_booking_at_another_cafe(self, mock_client_cls):
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=20000)
+    @patch("requests.get")
+    @patch("requests.post")
+    def test_order_from_one_cafe_cannot_pay_for_a_booking_at_another_cafe(self, mock_post, mock_get):
+        mock_post.return_value, mock_get.return_value = _mock_cashfree_responses(order_amount=200)
         order = payments.create_cafe_booking_order_handler(self.cafe_id, 200)
 
-        payment_id = f"pay_test_{uuid.uuid4().hex[:10]}"
-        result = payments.verify_razorpay_payment(
-            order["id"], payment_id, "irrelevant-mocked", 20000, cafe_id=self.other_cafe_id
-        )
+        result = payments.verify_cashfree_payment(order["order_id"], 20000, cafe_id=self.other_cafe_id)
         self.assertFalse(result, "An order created for one cafe must not verify a booking at a different cafe.")
 
-    @patch("razorpay.Client")
-    def test_unknown_order_id_is_rejected(self, mock_client_cls):
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=20000)
-        result = payments.verify_razorpay_payment(
-            "order_never_created", "pay_x", "sig_x", 20000, cafe_id=self.cafe_id
-        )
+    @patch("requests.get")
+    def test_unknown_order_id_is_rejected(self, mock_get):
+        _, mock_get.return_value = _mock_cashfree_responses(order_amount=200)
+        result = payments.verify_cashfree_payment("order_never_created", 20000, cafe_id=self.cafe_id)
         self.assertFalse(result)
 
 
-class TournamentRazorpayRoutingTests(SecurityTestCase):
-    """Paid tournament entry fees route through the same per-cafe Razorpay logic as
+@override_settings(CASHFREE_CLIENT_ID="platform_test_client_id", CASHFREE_CLIENT_SECRET="platform_test_secret")
+class TournamentCashfreeRoutingTests(SecurityTestCase):
+    """Paid tournament entry fees route through the same per-cafe Cashfree logic as
     bookings: the cafe's own account if connected, the platform account otherwise, and an
     order created for one cafe/tournament can't be replayed elsewhere."""
 
@@ -289,9 +292,9 @@ class TournamentRazorpayRoutingTests(SecurityTestCase):
         self.track("tournaments", result.inserted_id)
         return str(result.inserted_id)
 
-    @patch("razorpay.Client")
-    def test_unconfigured_cafe_tournament_order_falls_back_to_platform(self, mock_client_cls):
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=40000)
+    @patch("requests.post")
+    def test_unconfigured_cafe_tournament_order_falls_back_to_platform(self, mock_post):
+        mock_post.return_value, _ = _mock_cashfree_responses(order_amount=400)
         resp = self.client.post(
             f"/api/v1/main/cafes/{self.cafe_id}/payments/create-order/",
             {"amount": 400},
@@ -301,18 +304,17 @@ class TournamentRazorpayRoutingTests(SecurityTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.json()["used_platform_fallback"])
 
-    @patch("razorpay.Client")
-    def test_registration_succeeds_with_verified_platform_fallback_payment(self, mock_client_cls):
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=40000)
+    @patch("requests.get")
+    @patch("requests.post")
+    def test_registration_succeeds_with_verified_platform_fallback_payment(self, mock_post, mock_get):
+        mock_post.return_value, mock_get.return_value = _mock_cashfree_responses(order_amount=400)
         order = payments.create_cafe_booking_order_handler(self.cafe_id, 400)
 
         resp = self.client.post(
             f"/api/v1/main/tournaments/{self.tournament_id}/register/",
             {
                 "gamer_ids": ["Player1"],
-                "razorpay_order_id": order["id"],
-                "razorpay_payment_id": f"pay_test_{uuid.uuid4().hex[:10]}",
-                "razorpay_signature": "irrelevant-mocked",
+                "cashfree_order_id": order["order_id"],
             },
             format="json",
             **self.auth_header(self.player_token),
@@ -322,9 +324,10 @@ class TournamentRazorpayRoutingTests(SecurityTestCase):
         registration = self.db.registrations.find_one({"tournament_title": "Sectest Tournament"})
         self.assertEqual(registration["payment_settlement"], "platform_pending_payout")
 
-    @patch("razorpay.Client")
-    def test_registration_stamps_direct_to_cafe_when_owner_connected(self, mock_client_cls):
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=40000)
+    @patch("requests.get")
+    @patch("requests.post")
+    def test_registration_stamps_direct_to_cafe_when_owner_connected(self, mock_post, mock_get):
+        mock_post.return_value, mock_get.return_value = _mock_cashfree_responses(order_amount=400)
         connect_resp = _connect_owner_credentials(self, self.cafe_id, self.owner_token)
         self.assertEqual(connect_resp.status_code, 200)
         order = payments.create_cafe_booking_order_handler(self.cafe_id, 400)
@@ -333,9 +336,7 @@ class TournamentRazorpayRoutingTests(SecurityTestCase):
             f"/api/v1/main/tournaments/{self.tournament_id}/register/",
             {
                 "gamer_ids": ["Player1"],
-                "razorpay_order_id": order["id"],
-                "razorpay_payment_id": f"pay_test_{uuid.uuid4().hex[:10]}",
-                "razorpay_signature": "irrelevant-mocked",
+                "cashfree_order_id": order["order_id"],
             },
             format="json",
             **self.auth_header(self.player_token),
@@ -344,9 +345,7 @@ class TournamentRazorpayRoutingTests(SecurityTestCase):
         registration = self.db.registrations.find_one({"tournament_title": "Sectest Tournament"})
         self.assertEqual(registration["payment_settlement"], "direct_to_cafe")
 
-    @patch("razorpay.Client")
-    def test_registration_rejected_without_any_payment_fields(self, mock_client_cls):
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=40000)
+    def test_registration_rejected_without_any_payment_fields(self):
         resp = self.client.post(
             f"/api/v1/main/tournaments/{self.tournament_id}/register/",
             {"gamer_ids": ["Player1"]},
@@ -355,9 +354,10 @@ class TournamentRazorpayRoutingTests(SecurityTestCase):
         )
         self.assertEqual(resp.status_code, 400)
 
-    @patch("razorpay.Client")
-    def test_order_from_a_different_cafe_cannot_pay_for_this_tournament(self, mock_client_cls):
-        mock_client_cls.return_value = _mock_razorpay_client(order_amount=40000)
+    @patch("requests.get")
+    @patch("requests.post")
+    def test_order_from_a_different_cafe_cannot_pay_for_this_tournament(self, mock_post, mock_get):
+        mock_post.return_value, mock_get.return_value = _mock_cashfree_responses(order_amount=400)
         other_owner_email, _ = self.make_active_user(role="admin", collection="admins")
         other_cafe_id = self.make_cafe(owner_email=other_owner_email)
         try:
@@ -366,9 +366,7 @@ class TournamentRazorpayRoutingTests(SecurityTestCase):
                 f"/api/v1/main/tournaments/{self.tournament_id}/register/",
                 {
                     "gamer_ids": ["Player1"],
-                    "razorpay_order_id": order["id"],
-                    "razorpay_payment_id": f"pay_test_{uuid.uuid4().hex[:10]}",
-                    "razorpay_signature": "irrelevant-mocked",
+                    "cashfree_order_id": order["order_id"],
                 },
                 format="json",
                 **self.auth_header(self.player_token),

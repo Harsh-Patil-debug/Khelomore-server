@@ -309,20 +309,18 @@ def register_tournament_handler(tournament_id, user_email, data):
         gamer_ids = cleaned_ids
 
         # Entry fee is read from the tournament document (server-side/admin-set) — never trust
-        # a client-supplied amount. A paid tournament requires a verified Razorpay payment.
+        # a client-supplied amount. A paid tournament requires a verified Cashfree payment.
         entry_fee = tournament.get("entry_fee") or 0
         is_paid_entry = tournament.get("entry") == "Paid Entry" and int(entry_fee) > 0
         payment_settlement = None
         if is_paid_entry:
-            from .payments import verify_razorpay_payment
-            razorpay_order_id = data.get("razorpay_order_id")
-            razorpay_payment_id = data.get("razorpay_payment_id")
-            razorpay_signature = data.get("razorpay_signature")
+            from .payments import verify_cashfree_payment
+            cashfree_order_id = data.get("cashfree_order_id")
             tournament_cafe_id = tournament.get("cafe_id")
-            if not verify_razorpay_payment(razorpay_order_id, razorpay_payment_id, razorpay_signature, int(entry_fee) * 100, cafe_id=tournament_cafe_id):
+            if not verify_cashfree_payment(cashfree_order_id, int(entry_fee) * 100, cafe_id=tournament_cafe_id):
                 return {"status": "error", "message": "Payment verification failed. Please complete payment before registering."}
             if tournament_cafe_id:
-                order_record = db_main.cafe_payment_orders.find_one({"order_id": razorpay_order_id, "cafe_id": tournament_cafe_id})
+                order_record = db_main.cafe_payment_orders.find_one({"order_id": cashfree_order_id, "cafe_id": tournament_cafe_id})
                 payment_settlement = "platform_pending_payout" if (order_record and order_record.get("used_platform_fallback")) else "direct_to_cafe"
 
         # Store registration info in database

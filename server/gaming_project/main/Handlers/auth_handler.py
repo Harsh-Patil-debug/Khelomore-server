@@ -352,7 +352,7 @@ def get_user_collection(is_admin=False, role=""):
         return db_main.admins
     return db_main.admins if is_admin else db_main.users
 
-def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=False, role="", razorpay_password=None, terms_accepted=False):
+def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=False, role="", payment_credentials_password=None, terms_accepted=False):
     """Signup Step 1 - creates pending user, sends OTP, NO JWT yet."""
     try:
         dec_gamertag = decrypt_data(gamertag, iv).strip()
@@ -360,11 +360,11 @@ def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=F
         dec_password = decrypt_data(password, iv)
         dec_phone    = decrypt_data(phone, iv).strip() if phone else ""
         # A cafe owner (role="admin") sets a SEPARATE password here that later gates access
-        # to entering/viewing their Razorpay credentials in cafe-command-center — distinct
-        # from their login password so a compromised login session alone can't unlock
-        # payment-routing settings.
+        # to entering/viewing their payment gateway credentials in cafe-command-center —
+        # distinct from their login password so a compromised login session alone can't
+        # unlock payment-routing settings.
         is_cafe_owner_signup = (is_admin or role == "admin") and role != "super_admin"
-        dec_razorpay_password = decrypt_data(razorpay_password, iv) if razorpay_password else ""
+        dec_payment_credentials_password = decrypt_data(payment_credentials_password, iv) if payment_credentials_password else ""
     except Exception as e:
         return {"error": f"Decryption failed: {str(e)}"}, 400
 
@@ -395,13 +395,13 @@ def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=F
     if not is_cafe_owner_signup and role != "super_admin" and not terms_accepted:
         return {"error": "You must accept the Terms & Conditions, Privacy Policy and Cancellation & Refund Policy to register."}, 400
     if is_cafe_owner_signup:
-        if not dec_razorpay_password:
-            return {"error": "A Razorpay password is required to protect your payment settings."}, 400
-        razorpay_password_error = input_validation.validate_password_strength(dec_razorpay_password)
-        if razorpay_password_error:
-            return {"error": f"Razorpay password: {razorpay_password_error}"}, 400
-        if dec_razorpay_password == dec_password:
-            return {"error": "Your Razorpay password must be different from your login password."}, 400
+        if not dec_payment_credentials_password:
+            return {"error": "A payment password is required to protect your payment settings."}, 400
+        payment_credentials_password_error = input_validation.validate_password_strength(dec_payment_credentials_password)
+        if payment_credentials_password_error:
+            return {"error": f"Payment password: {payment_credentials_password_error}"}, 400
+        if dec_payment_credentials_password == dec_password:
+            return {"error": "Your payment password must be different from your login password."}, 400
 
     coll = get_user_collection(is_admin, role)
     if is_cafe_owner_signup:
@@ -434,7 +434,7 @@ def bookmyconsole_register(gamertag, email, password, iv, phone=None, is_admin=F
         new_user_doc["privacyAccepted"] = True
         new_user_doc["cancellationPolicyAccepted"] = True
     if is_cafe_owner_signup:
-        new_user_doc["razorpay_password_hash"] = ph.hash(dec_razorpay_password)
+        new_user_doc["payment_credentials_password_hash"] = ph.hash(dec_payment_credentials_password)
 
     coll.insert_one(new_user_doc)
 

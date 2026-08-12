@@ -1,6 +1,6 @@
 # subscriptions.py
 # Handlers for the cafe-owner platform subscription: a flat ₹1599/month fee, paid manually
-# each cycle via a Razorpay order (not an auto-recurring mandate) — see the "Monthly Pay
+# each cycle via a Cashfree order (not an auto-recurring mandate) — see the "Monthly Pay
 # Now order" decision. A brand-new cafe gets a SUBSCRIPTION_TRIAL_DAYS free trial before
 # its first charge (existing cafes, already on the old ₹1500 rate, are never retroactively
 # changed — see _ensure_defaults). A cafe more than SUBSCRIPTION_GRACE_DAYS past its due
@@ -228,16 +228,17 @@ def create_subscription_order_handler(cafe_id: str):
         return {"status": "error", "message": "Cafe not found."}, 404
 
     cafe = _ensure_defaults(db, cafe)
-    order = payments.create_razorpay_order_handler(cafe.get("subscription_amount", SUBSCRIPTION_MONTHLY_AMOUNT))
-    from django.conf import settings
+    order = payments.create_cashfree_order_handler(
+        cafe.get("subscription_amount", SUBSCRIPTION_MONTHLY_AMOUNT),
+        customer_email=cafe.get("owner_email"),
+    )
     return {
         "status": "success",
         "order": order,
-        "key_id": getattr(settings, "RAZORPAY_KEY_ID", ""),
     }, 200
 
 
-def _extend_subscription(db, cafe: dict, method: str, marked_by: str = "", razorpay_order_id: str = "", razorpay_payment_id: str = ""):
+def _extend_subscription(db, cafe: dict, method: str, marked_by: str = "", cashfree_order_id: str = ""):
     now = datetime.now(IST)
     current_due = cafe.get("subscription_due_date") or now
     if current_due.tzinfo is None:
@@ -271,8 +272,7 @@ def _extend_subscription(db, cafe: dict, method: str, marked_by: str = "", razor
         "cafe_id": str(cafe["_id"]),
         "amount": amount,
         "method": method,
-        "razorpay_order_id": razorpay_order_id,
-        "razorpay_payment_id": razorpay_payment_id,
+        "cashfree_order_id": cashfree_order_id,
         "marked_by": marked_by,
         "paid_at": now,
         "period_start": period_start,
@@ -287,7 +287,7 @@ def _extend_subscription(db, cafe: dict, method: str, marked_by: str = "", razor
     return cafe
 
 
-def verify_subscription_payment_handler(cafe_id: str, razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str):
+def verify_subscription_payment_handler(cafe_id: str, cashfree_order_id: str):
     db = get_db()
     if db is None:
         return {"status": "error", "message": "MongoDB connection is not established."}, 500
@@ -303,15 +303,13 @@ def verify_subscription_payment_handler(cafe_id: str, razorpay_order_id: str, ra
     cafe = _ensure_defaults(db, cafe)
     amount = cafe.get("subscription_amount", SUBSCRIPTION_MONTHLY_AMOUNT)
 
-    verified = payments.verify_razorpay_payment(
-        razorpay_order_id, razorpay_payment_id, razorpay_signature, int(amount) * 100
-    )
+    verified = payments.verify_cashfree_payment(cashfree_order_id, int(amount) * 100)
     if not verified:
         return {"status": "error", "message": "Payment verification failed."}, 402
 
     cafe = _extend_subscription(
-        db, cafe, method="razorpay",
-        razorpay_order_id=razorpay_order_id, razorpay_payment_id=razorpay_payment_id,
+        db, cafe, method="cashfree",
+        cashfree_order_id=cashfree_order_id,
     )
     return {"status": "success", "subscription": _to_view(cafe)}, 200
 
@@ -364,7 +362,7 @@ def get_all_subscription_payments_handler():
     """
     Super-admin-only: every subscription payment ever recorded, across all cafes — this
     is the platform's actual recurring-revenue ledger (real money BookMyConsole itself earns),
-    as distinct from booking payments, which route to each cafe's own Razorpay account
+    as distinct from booking payments, which route to each cafe's own Cashfree account
     (or the platform's fallback account, pending payout to the cafe) and are never
     platform revenue. For the Payments page.
     """
@@ -385,9 +383,8 @@ def get_all_subscription_payments_handler():
             "cafe_name": cafe.get("name", "") if cafe else "Deleted cafe",
             "city": cafe.get("city", "") if cafe else "",
             "amount": p.get("amount"),
-            "method": p.get("method", "razorpay"),
-            "razorpay_order_id": p.get("razorpay_order_id") or "",
-            "razorpay_payment_id": p.get("razorpay_payment_id") or "",
+            "method": p.get("method", "cashfree"),
+            "cashfree_order_id": p.get("cashfree_order_id") or "",
             "marked_by": p.get("marked_by") or "",
             "paid_at": _to_ist_iso(p.get("paid_at")),
             "period_start": _to_ist_iso(p.get("period_start")),
