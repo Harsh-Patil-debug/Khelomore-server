@@ -279,6 +279,10 @@ def register_tournament_handler(tournament_id, user_email, data):
         if not tournament.get("registration_open", True):
             return {"status": "error", "message": "Registrations are closed for this tournament."}
 
+        cleaned_email = (user_email or "").strip().lower()
+        if cleaned_email and db_main.registrations.find_one({"tournament_id": oid, "user_email": cleaned_email}):
+            return {"status": "error", "message": "You've already registered for this tournament."}
+
         # Check capacity
         registered = int(tournament.get("registered", 0))
         capacity = int(tournament.get("capacity", 32))
