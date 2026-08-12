@@ -277,8 +277,10 @@ def create_cafe_booking_order_handler(cafe_id, amount_in_inr, zone=None, date=No
 
     customer_phone = None
     if user_email:
+        from .auth_handler import decrypt_phone_field
         user_doc = db_main.users.find_one({"email": user_email}, {"phone": 1})
-        customer_phone = user_doc.get("phone") if user_doc else None
+        phone_raw = user_doc.get("phone") if user_doc else None
+        customer_phone = decrypt_phone_field(phone_raw) if phone_raw else None
 
     client_id, client_secret, used_platform_fallback = get_cafe_cashfree_credentials(cafe)
     order = create_cashfree_order_handler(amount_in_inr, user_email, customer_phone, client_id, client_secret)
