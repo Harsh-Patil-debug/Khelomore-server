@@ -8,9 +8,30 @@ from datetime import datetime, timezone
 import cloudinary
 import cloudinary.uploader
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 from .db_connection import get_db
 from .upload_validation import validate_image_upload
 from . import input_validation
+
+_registrations_index_ensured = False
+
+
+def _ensure_registrations_index(db_main):
+    """Lazily creates the unique index that actually guarantees one registration per
+    (tournament_id, user_email) — the find_one check in register_tournament_handler is
+    just a fast-fail UX nicety and races on its own: two concurrent requests from the
+    same user (a double-tap, a network retry) can both pass that read before either
+    commits its insert. This index is what makes the second insert fail atomically at
+    the database level instead of silently succeeding twice."""
+    global _registrations_index_ensured
+    if not _registrations_index_ensured:
+        try:
+            db_main.registrations.create_index(
+                [("tournament_id", 1), ("user_email", 1)], unique=True
+            )
+        except Exception:
+            pass
+        _registrations_index_ensured = True
 
 # Configure Cloudinary
 cloudinary_secret = os.getenv("CLOUDINARY_API_SECRET")
@@ -279,6 +300,7 @@ def register_tournament_handler(tournament_id, user_email, data):
         if not tournament.get("registration_open", True):
             return {"status": "error", "message": "Registrations are closed for this tournament."}
 
+        _ensure_registrations_index(db_main)
         cleaned_email = (user_email or "").strip().lower()
         if cleaned_email and db_main.registrations.find_one({"tournament_id": oid, "user_email": cleaned_email}):
             return {"status": "error", "message": "You've already registered for this tournament."}
@@ -337,7 +359,23 @@ def register_tournament_handler(tournament_id, user_email, data):
             "payment_settlement": payment_settlement,
             "registered_at": datetime.now(timezone.utc)
         }
-        db_main.registrations.insert_one(registration_doc)
+        try:
+            db_main.registrations.insert_one(registration_doc)
+        except DuplicateKeyError:
+            # Lost the race: another request for this same (tournament_id, user_email)
+            # committed first, between the find_one check above and this insert. For a
+            # free tournament this is a harmless no-op rejection. For a paid one, the
+            # payment was already verified and claimed (verify_cashfree_payment's replay
+            # protection) before this insert ever ran — that money is real and already
+            # captured, so this is the same residual "contact support for a refund" gap
+            # as the equivalent slot-booking race, not something silently fixed here.
+            message = "You've already registered for this tournament."
+            if is_paid_entry:
+                message = (
+                    "You've already registered for this tournament. Your payment was "
+                    "captured — contact support for a refund if this was unexpected."
+                )
+            return {"status": "error", "message": message}
 
         # Increment registered slots
         new_registered = registered + 1
