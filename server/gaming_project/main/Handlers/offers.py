@@ -116,10 +116,10 @@ def _price_for_offer(offer, hourly_price, num_slots):
     return int(per_hour * num_slots)
 
 
-def compute_best_price(cafe_id, hourly_price, num_slots, coupon_code=None):
+def compute_best_price(cafe_id, hourly_price, num_slots, coupon_code=None, offer_id=None):
     """
     THE server-side source of truth for what a booking of num_slots hours at this cafe
-    actually costs right now — used identically by the checkout coupon-preview endpoint
+    actually costs right now — used identically by the checkout offer-preview endpoint
     and by create_booking_handler's final payment verification, so a customer can never
     be shown/charged one price and have the booking verified against a different one.
     Never trust a client-supplied price or discount for this — every active offer is
@@ -127,20 +127,19 @@ def compute_best_price(cafe_id, hourly_price, num_slots, coupon_code=None):
 
     Returns (total_price: int, applied_offer_id: str | None, error: str | None).
 
-    - coupon_code given: ONLY that specific coded offer is considered (must belong to
-      this cafe, be currently active, and match the code case-insensitively). An
-      invalid/expired/non-matching code is a real error, not a silent fallback to
-      auto-applied offers — a customer who typed a bad code should be told that
-      plainly, never quietly switched to a different discount without knowing why.
-    - coupon_code omitted: only offers with NO code are considered (coupons never
-      auto-apply — the whole point of requiring a code is that the customer chooses
-      to use it), and the cheapest resulting total among them (or the normal price, if
-      none apply) is used automatically. Matches "only the better one applies" — never
-      stacks two offers on one booking.
+    NOTHING auto-applies. A customer must explicitly tap Apply on one specific offer in
+    the checkout list — identified by offer_id (works for any offer, coded or not) or by
+    coupon_code (for a coded offer, matched case-insensitively) — and that selection is
+    what gets priced and, later, verified against the actual payment. Omitting both means
+    the customer didn't apply anything, and the plain normal_total is what's charged; it
+    is never silently swapped for a "best" discount the customer didn't choose.
     """
     normal_total = int(round(hourly_price)) * int(num_slots)
     db = get_db()
     if db is None or not cafe_id:
+        return normal_total, None, None
+
+    if not coupon_code and not offer_id:
         return normal_total, None, None
 
     try:
@@ -154,29 +153,23 @@ def compute_best_price(cafe_id, hourly_price, num_slots, coupon_code=None):
             "end_date": {"$gte": today_str},
         }))
 
-        if coupon_code:
-            normalized = coupon_code.strip().upper()
+        if offer_id:
+            match = next((o for o in active_offers if str(o["_id"]) == str(offer_id)), None)
+            if not match:
+                return None, None, "This offer is no longer available."
+        else:
+            normalized = str(coupon_code).strip().upper()
             match = next(
                 (o for o in active_offers if (o.get("code") or "").strip().upper() == normalized),
                 None,
             )
             if not match:
                 return None, None, "Invalid or expired coupon code."
-            price = _price_for_offer(match, hourly_price, num_slots)
-            if price is None:
-                return None, None, "This coupon isn't valid for this booking (check the minimum hours required)."
-            return min(price, normal_total), str(match["_id"]), None
 
-        best_total = normal_total
-        best_offer_id = None
-        for offer in active_offers:
-            if (offer.get("code") or "").strip():
-                continue  # requires a manually-applied code — never auto-applied
-            price = _price_for_offer(offer, hourly_price, num_slots)
-            if price is not None and price < best_total:
-                best_total = price
-                best_offer_id = str(offer["_id"])
-        return best_total, best_offer_id, None
+        price = _price_for_offer(match, hourly_price, num_slots)
+        if price is None:
+            return None, None, "This offer isn't valid for this booking (check the minimum hours required)."
+        return min(price, normal_total), str(match["_id"]), None
     except Exception as e:
         print(f"[Offers] compute_best_price error: {e}")
         return normal_total, None, None

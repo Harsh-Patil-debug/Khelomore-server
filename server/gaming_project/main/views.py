@@ -708,6 +708,7 @@ class BookingListCreateView(APIView):
             # The client must complete Cashfree checkout first and pass the resulting order id here.
             cashfree_order_id   = data.get("cashfree_order_id"),
             coupon_code         = data.get("coupon_code"),
+            offer_id            = data.get("offer_id"),
         )
         return Response(result, status=status_code)
 
@@ -1661,22 +1662,25 @@ class ActiveOffersView(APIView):
 
 class ValidateCouponView(APIView):
     """
-    POST /offers/validate-coupon/ — PUBLIC. Body: {cafe_id, code, hours (slot count),
-    rig (optional, for a rig-specific rate)}. Lets checkout show the discounted total the
-    instant a customer taps Apply, using the exact same compute_best_price the final
-    booking verification uses — so what's previewed here is guaranteed to be what
-    actually gets charged/verified, never a separately-computed "close enough" estimate.
-    Two active coupons can both show in the checkout list; only ONE is ever passed here
-    (and later to create_booking_handler) at a time — applying a second call replaces
-    the previous choice rather than combining them.
+    POST /offers/validate-coupon/ — PUBLIC. Body: {cafe_id, hours (slot count),
+    offer_id and/or code, rig (optional, for a rig-specific rate)}. Lets checkout show
+    the discounted total the instant a customer taps Apply on ONE specific offer —
+    identified by offer_id (works for any active offer, coded or not) or by code (for a
+    coded offer) — using the exact same compute_best_price the final booking
+    verification uses, so what's previewed here is guaranteed to be what actually gets
+    charged/verified, never a separately-computed "close enough" estimate. Nothing
+    auto-applies: every offer in the checkout list requires this explicit Apply call.
+    Two offers can both show in the list; only ONE is ever passed here (and later to
+    create_booking_handler) at a time — applying a second call replaces the first.
     """
     def post(self, request):
         cafe_id = request.data.get("cafe_id")
         code = request.data.get("code")
+        offer_id = request.data.get("offer_id")
         hours = request.data.get("hours")
         rig = request.data.get("rig")
-        if not cafe_id or not code:
-            return Response({"status": "error", "message": "cafe_id and code are required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not cafe_id or not (code or offer_id):
+            return Response({"status": "error", "message": "cafe_id and (offer_id or code) are required."}, status=status.HTTP_400_BAD_REQUEST)
         try:
             num_slots = int(hours)
         except (TypeError, ValueError):
@@ -1686,7 +1690,11 @@ class ValidateCouponView(APIView):
 
         rig_name = rig.split("·")[0].strip() if rig else None
         hourly_price = bookings_handler._resolve_hourly_price(str(cafe_id), rig_name)
-        total, applied_offer_id, error = offers.compute_best_price(str(cafe_id), hourly_price, num_slots, coupon_code=str(code))
+        total, applied_offer_id, error = offers.compute_best_price(
+            str(cafe_id), hourly_price, num_slots,
+            coupon_code=str(code) if code else None,
+            offer_id=str(offer_id) if offer_id else None,
+        )
         if error:
             return Response({"status": "error", "message": error}, status=status.HTTP_400_BAD_REQUEST)
         return Response({

@@ -306,7 +306,7 @@ def _resolve_hourly_price(cafe_id, rig_name=None):
     return 150
 
 
-def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: str, date: str, slots: list, rig: "str | None" = None, user_name: "str | None" = None, user_phone: str = "", cashfree_order_id: "str | None" = None, coupon_code: "str | None" = None):
+def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: str, date: str, slots: list, rig: "str | None" = None, user_name: "str | None" = None, user_phone: str = "", cashfree_order_id: "str | None" = None, coupon_code: "str | None" = None, offer_id: "str | None" = None):
     """
     Validates slot availability and saves the booking record.
     Price is always computed server-side from the cafe/rig's hourly rate — a client-supplied
@@ -424,7 +424,7 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
         # after the customer had already paid.
         from .offers import compute_best_price
         total_price, applied_offer_id, price_error = compute_best_price(
-            cafe_id, hourly_price, len(slots), coupon_code=coupon_code
+            cafe_id, hourly_price, len(slots), coupon_code=coupon_code, offer_id=offer_id
         )
         if price_error:
             if hold_token:
