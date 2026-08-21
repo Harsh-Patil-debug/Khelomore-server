@@ -1,3 +1,4 @@
+import math
 import random
 from datetime import datetime, timezone, timedelta
 from bson.objectid import ObjectId
@@ -409,6 +410,24 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
         # 2b. Compute the authoritative price server-side and verify payment before booking.
         rig_name_for_price = rig.split("·")[0].strip() if rig else None
         hourly_price = _resolve_hourly_price(cafe_id, rig_name_for_price)
+
+        # Apply this cafe's best currently-active offer, looked up fresh here — never
+        # trusted from the client. The mobile app displays this same discounted price
+        # and pays the discounted Cashfree amount (see cafe/[id].tsx's rigHourlyPrice);
+        # without applying it here too, this server-side recomputation would land on the
+        # FULL undiscounted price, verify_cashfree_payment's amount check would then
+        # never match what was actually paid, and every booking at a cafe running an
+        # active offer would fail verification after the customer had already paid.
+        from .offers import get_best_active_discount_pct
+        discount_pct = get_best_active_discount_pct(cafe_id)
+        if discount_pct > 0:
+            # math.floor(x + 0.5) matches JS's Math.round (round-half-up) exactly, unlike
+            # Python's built-in round() (banker's rounding) — the mobile client computes
+            # its displayed/charged price with Math.round, so this must agree with it on
+            # every value, including exact .5 cases, or the amounts silently diverge by
+            # ₹1 and verification fails the same way this fix exists to prevent.
+            hourly_price = math.floor(hourly_price * (1 - discount_pct / 100) + 0.5)
+
         total_price = int(hourly_price * len(slots))
 
         payment_settlement = None

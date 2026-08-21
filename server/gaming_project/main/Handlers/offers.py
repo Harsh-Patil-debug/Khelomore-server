@@ -72,6 +72,41 @@ def get_active_offers_handler(cafe_id=None):
         return {"status": "error", "message": str(e)}, 500
 
 
+def get_best_active_discount_pct(cafe_id):
+    """
+    Server-side source of truth for "what discount, if any, currently applies to a
+    booking at this cafe" — the same active-offer query as get_active_offers_handler,
+    reduced to just the number booking price calculations actually need. Used by
+    create_booking_handler so the price it verifies the Cashfree payment against
+    actually matches what the client displayed/charged, instead of silently assuming
+    no offer is active. Never trust a client-supplied discount_pct for this — a cafe's
+    real active offers are looked up fresh here, same as _resolve_hourly_price does for
+    the base rate.
+    """
+    db = get_db()
+    if db is None or not cafe_id:
+        return 0
+    try:
+        from .bookings_handler import IST
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        docs = db.offers.find({
+            "cafe_id": cafe_id,
+            "is_active": True,
+            "is_deleted": {"$ne": True},
+            "start_date": {"$lte": today_str},
+            "end_date": {"$gte": today_str},
+        })
+        best = 0
+        for d in docs:
+            pct = int(d.get("discount_pct", 0) or 0)
+            if pct > best:
+                best = pct
+        return min(100, max(0, best))
+    except Exception as e:
+        print(f"[Offers] get_best_active_discount_pct error: {e}")
+        return 0
+
+
 def create_offer_handler(data):
     """Creates a new offer in MongoDB."""
     db = get_db()
