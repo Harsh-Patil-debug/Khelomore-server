@@ -104,6 +104,7 @@ urlpatterns = [
 
     # ── Offers & Promotions ────────────────────────────────────────────────────
     path('offers/active/', ActiveOffersView.as_view(), name='offers_active'),       # PUBLIC
+    path('offers/validate-coupon/', ValidateCouponView.as_view(), name='offers_validate_coupon'),  # PUBLIC
     path('offers/', OfferListCreateView.as_view(), name='offers'),                  # admin GET/POST
     path('offers/<str:offer_id>/', OfferDetailView.as_view(), name='offer_detail'), # admin PATCH/DELETE
     path('stats/', PlatformStatsView.as_view(), name='platform_stats'),             # PUBLIC

@@ -1,4 +1,3 @@
-import math
 import random
 from datetime import datetime, timezone, timedelta
 from bson.objectid import ObjectId
@@ -307,7 +306,7 @@ def _resolve_hourly_price(cafe_id, rig_name=None):
     return 150
 
 
-def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: str, date: str, slots: list, rig: "str | None" = None, user_name: "str | None" = None, user_phone: str = "", cashfree_order_id: "str | None" = None):
+def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: str, date: str, slots: list, rig: "str | None" = None, user_name: "str | None" = None, user_phone: str = "", cashfree_order_id: "str | None" = None, coupon_code: "str | None" = None):
     """
     Validates slot availability and saves the booking record.
     Price is always computed server-side from the cafe/rig's hourly rate — a client-supplied
@@ -411,37 +410,30 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
         rig_name_for_price = rig.split("·")[0].strip() if rig else None
         hourly_price = _resolve_hourly_price(cafe_id, rig_name_for_price)
 
-        # Apply this cafe's best currently-active offer, looked up fresh here — never
-        # trusted from the client. The mobile app displays this same discounted price
-        # and pays the discounted Cashfree amount (see cafe/[id].tsx's rigHourlyPrice);
-        # without applying it here too, this server-side recomputation would land on the
-        # FULL undiscounted price, verify_cashfree_payment's amount check would then
-        # never match what was actually paid, and every booking at a cafe running an
-        # active offer would fail verification after the customer had already paid.
-        from .offers import get_best_active_discount_pct
-        discount_pct = get_best_active_discount_pct(cafe_id)
-        if discount_pct > 0:
-            # math.floor(x + 0.5) matches JS's Math.round (round-half-up) exactly, unlike
-            # Python's built-in round() (banker's rounding) — the mobile client computes
-            # its displayed/charged price with Math.round, so this must agree with it on
-            # every value, including exact .5 cases, or the amounts silently diverge by
-            # ₹1 and verification fails the same way this fix exists to prevent.
-            hourly_price = math.floor(hourly_price * (1 - discount_pct / 100) + 0.5)
+        # Looked up BEFORE any price/verification error path (not after) so hold_token is
+        # available to release on EVERY failure from here on, not only the payment-failed
+        # case — otherwise a hold from order-creation time would sit reserved for its
+        # full TTL even though this specific attempt is already dead and never retried.
+        order_record = db_main.cafe_payment_orders.find_one({"order_id": cashfree_order_id, "cafe_id": cafe_id})
+        hold_token = order_record.get("hold_token") if order_record else None
 
-        total_price = int(hourly_price * len(slots))
+        # Server-side source of truth for this cafe's current best price — never trusted
+        # from the client. The mobile app displays/pays this exact same computed total
+        # (see cafe/[id].tsx); without recomputing it identically here, a mismatch would
+        # make verify_cashfree_payment's amount check fail for every discounted booking,
+        # after the customer had already paid.
+        from .offers import compute_best_price
+        total_price, applied_offer_id, price_error = compute_best_price(
+            cafe_id, hourly_price, len(slots), coupon_code=coupon_code
+        )
+        if price_error:
+            if hold_token:
+                release_slot_hold(cafe_id, date, rig, slots, hold_token)
+            return {"status": "error", "message": price_error}, 400
 
         payment_settlement = None
-        hold_token = None
         if total_price > 0:
             from .payments import verify_cashfree_payment
-            # Looked up BEFORE the verification check (not after) so hold_token is
-            # available to release on a verification failure too, not only in the
-            # success path — otherwise a hold from order-creation time would sit
-            # reserved for its full TTL even though this specific attempt is already
-            # dead and never retried.
-            order_record = db_main.cafe_payment_orders.find_one({"order_id": cashfree_order_id, "cafe_id": cafe_id})
-            hold_token = order_record.get("hold_token") if order_record else None
-
             if not verify_cashfree_payment(cashfree_order_id, total_price * 100, cafe_id=cafe_id):
                 if hold_token:
                     release_slot_hold(cafe_id, date, rig, slots, hold_token)

@@ -707,6 +707,7 @@ class BookingListCreateView(APIView):
             # bookings_handler.create_booking_handler) — a client can no longer dictate them.
             # The client must complete Cashfree checkout first and pass the resulting order id here.
             cashfree_order_id   = data.get("cashfree_order_id"),
+            coupon_code         = data.get("coupon_code"),
         )
         return Response(result, status=status_code)
 
@@ -1656,6 +1657,44 @@ class ActiveOffersView(APIView):
         cafe_id = request.query_params.get("cafe_id")
         result, status_code = offers.get_active_offers_handler(cafe_id=cafe_id)
         return Response(result, status=status_code)
+
+
+class ValidateCouponView(APIView):
+    """
+    POST /offers/validate-coupon/ — PUBLIC. Body: {cafe_id, code, hours (slot count),
+    rig (optional, for a rig-specific rate)}. Lets checkout show the discounted total the
+    instant a customer taps Apply, using the exact same compute_best_price the final
+    booking verification uses — so what's previewed here is guaranteed to be what
+    actually gets charged/verified, never a separately-computed "close enough" estimate.
+    Two active coupons can both show in the checkout list; only ONE is ever passed here
+    (and later to create_booking_handler) at a time — applying a second call replaces
+    the previous choice rather than combining them.
+    """
+    def post(self, request):
+        cafe_id = request.data.get("cafe_id")
+        code = request.data.get("code")
+        hours = request.data.get("hours")
+        rig = request.data.get("rig")
+        if not cafe_id or not code:
+            return Response({"status": "error", "message": "cafe_id and code are required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            num_slots = int(hours)
+        except (TypeError, ValueError):
+            return Response({"status": "error", "message": "hours must be a number."}, status=status.HTTP_400_BAD_REQUEST)
+        if num_slots <= 0:
+            return Response({"status": "error", "message": "Select at least one slot first."}, status=status.HTTP_400_BAD_REQUEST)
+
+        rig_name = rig.split("·")[0].strip() if rig else None
+        hourly_price = bookings_handler._resolve_hourly_price(str(cafe_id), rig_name)
+        total, applied_offer_id, error = offers.compute_best_price(str(cafe_id), hourly_price, num_slots, coupon_code=str(code))
+        if error:
+            return Response({"status": "error", "message": error}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "status": "success",
+            "total_price": total,
+            "normal_price": int(round(hourly_price)) * num_slots,
+            "applied_offer_id": applied_offer_id,
+        }, status=status.HTTP_200_OK)
 
 
 # ── Super Admin User Management ────────────────────────────────────────────────
