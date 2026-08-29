@@ -54,7 +54,7 @@ def safe_object_id(id_str):
         return id_str
 
 
-def map_tournament_doc(doc, cafe_name=None):
+def map_tournament_doc(doc, cafe_name=None, cafe_address=None):
     """Maps a MongoDB tournament document to the format expected by the frontend."""
     starts_iso = doc.get("starts_iso")
     status = doc.get("status", "upcoming")
@@ -84,24 +84,30 @@ def map_tournament_doc(doc, cafe_name=None):
         # None for platform-wide tournaments (no cafe_id) - the frontend shows a
         # "BookMyConsole" / platform badge in that case instead of a cafe name.
         "cafe_name": cafe_name,
+        # Full street address — the tournament card shows this instead of just the name
+        # so a player can actually tell where to go without opening the cafe page first.
+        "cafe_address": cafe_address,
         "status": status
     }
 
 
 def _resolve_cafe_name(db_main, cafe_id):
-    """Looks up a single cafe's display name for one tournament doc (create/update/etc)."""
+    """Looks up a single cafe's display name + address for one tournament doc
+    (create/update/etc). Returns (name, address) — either may be None."""
     if not cafe_id:
-        return None
+        return None, None
     try:
-        cafe = db_main.cafes.find_one({"_id": ObjectId(cafe_id)}, {"name": 1})
-        return cafe.get("name") if cafe else None
+        cafe = db_main.cafes.find_one({"_id": ObjectId(cafe_id)}, {"name": 1, "address": 1})
+        if not cafe:
+            return None, None
+        return cafe.get("name"), cafe.get("address")
     except Exception:
-        return None
+        return None, None
 
 
 def _resolve_cafe_names_batch(db_main, cafe_ids):
-    """Batch-resolves many tournaments' cafe_ids to names in one query (used by the list
-    endpoint) instead of one lookup per tournament."""
+    """Batch-resolves many tournaments' cafe_ids to {name, address} in one query (used by
+    the list endpoint) instead of one lookup per tournament."""
     valid_ids = []
     for cid in cafe_ids:
         if not cid:
@@ -112,8 +118,8 @@ def _resolve_cafe_names_batch(db_main, cafe_ids):
             continue
     if not valid_ids:
         return {}
-    cafes = db_main.cafes.find({"_id": {"$in": valid_ids}}, {"name": 1})
-    return {str(c["_id"]): c.get("name") for c in cafes}
+    cafes = db_main.cafes.find({"_id": {"$in": valid_ids}}, {"name": 1, "address": 1})
+    return {str(c["_id"]): {"name": c.get("name"), "address": c.get("address")} for c in cafes}
 
 
 def get_tournaments_handler(cafe_id=None):
@@ -139,8 +145,15 @@ def get_tournaments_handler(cafe_id=None):
             ]
 
         docs = list(db_main.tournaments.find(query))
-        cafe_names_by_id = _resolve_cafe_names_batch(db_main, [d.get("cafe_id") for d in docs])
-        mapped = [map_tournament_doc(d, cafe_name=cafe_names_by_id.get(d.get("cafe_id"))) for d in docs]
+        cafe_info_by_id = _resolve_cafe_names_batch(db_main, [d.get("cafe_id") for d in docs])
+        mapped = [
+            map_tournament_doc(
+                d,
+                cafe_name=cafe_info_by_id.get(d.get("cafe_id"), {}).get("name"),
+                cafe_address=cafe_info_by_id.get(d.get("cafe_id"), {}).get("address"),
+            )
+            for d in docs
+        ]
 
         return {"status": "success", "tournaments": mapped}
     except Exception as e:
@@ -166,8 +179,8 @@ def toggle_registration_handler(tournament_id):
         action = "opened" if new_value else "closed"
         print(f"[BookMyConsole] Admin {action} registration for: '{doc.get('title')}'")
 
-        cafe_name = _resolve_cafe_name(db_main, doc.get("cafe_id"))
-        return {"status": "success", "tournament": map_tournament_doc(doc, cafe_name=cafe_name)}
+        cafe_name, cafe_address = _resolve_cafe_name(db_main, doc.get("cafe_id"))
+        return {"status": "success", "tournament": map_tournament_doc(doc, cafe_name=cafe_name, cafe_address=cafe_address)}
     except Exception as e:
         return {"status": "error", "message": f"Failed to toggle registration: {e}"}
 
@@ -274,8 +287,8 @@ def create_tournament_handler(data, files=None):
         result = db_main.tournaments.insert_one(tournament_doc)
         tournament_doc["_id"] = result.inserted_id
 
-        cafe_name = _resolve_cafe_name(db_main, tournament_doc.get("cafe_id"))
-        return {"status": "success", "tournament": map_tournament_doc(tournament_doc, cafe_name=cafe_name)}
+        cafe_name, cafe_address = _resolve_cafe_name(db_main, tournament_doc.get("cafe_id"))
+        return {"status": "success", "tournament": map_tournament_doc(tournament_doc, cafe_name=cafe_name, cafe_address=cafe_address)}
     except Exception as e:
         return {"status": "error", "message": f"Failed to create tournament: {e}"}
 
@@ -391,8 +404,8 @@ def register_tournament_handler(tournament_id, user_email, data):
         updated_tournament = db_main.tournaments.find_one({"_id": oid})
         # cafe_id never changes during registration - reuse the already-validated
         # `tournament` doc fetched above instead of re-checking updated_tournament for None.
-        cafe_name = _resolve_cafe_name(db_main, tournament.get("cafe_id"))
-        return {"status": "success", "tournament": map_tournament_doc(updated_tournament, cafe_name=cafe_name)}
+        cafe_name, cafe_address = _resolve_cafe_name(db_main, tournament.get("cafe_id"))
+        return {"status": "success", "tournament": map_tournament_doc(updated_tournament, cafe_name=cafe_name, cafe_address=cafe_address)}
 
     except Exception as e:
         print(f"[BookMyConsole] Failed to register for tournament: {e}")
@@ -522,8 +535,8 @@ def update_tournament_handler(tournament_id, data, files=None):
         updated_doc = db_main.tournaments.find_one({"_id": oid})
         # cafe_id isn't an editable field here - reuse the already-validated `existing`
         # doc instead of re-checking updated_doc for None.
-        cafe_name = _resolve_cafe_name(db_main, existing.get("cafe_id"))
-        return {"status": "success", "tournament": map_tournament_doc(updated_doc, cafe_name=cafe_name)}
+        cafe_name, cafe_address = _resolve_cafe_name(db_main, existing.get("cafe_id"))
+        return {"status": "success", "tournament": map_tournament_doc(updated_doc, cafe_name=cafe_name, cafe_address=cafe_address)}
 
     except Exception as e:
         print(f"[BookMyConsole] Failed to update tournament: {e}")
