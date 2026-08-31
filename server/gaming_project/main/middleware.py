@@ -16,7 +16,16 @@ from django.conf import settings
 from django.http import JsonResponse
 
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-AUTH_COOKIE_NAMES = ("bmc_gamer_token", "bmc_website_token", "bmc_admin_token", "bmc_super_admin_token")
+# Includes the refresh cookies too — /auth/refresh/ is a cookie-authenticated unsafe-method
+# (POST) endpoint just like any other, even though the refresh cookie itself is
+# path-scoped rather than sent on every request. Without listing them here, a cross-site
+# POST to /auth/refresh/ would sail through this check entirely (treated as "not
+# cookie-authenticated"), since the matching access-token cookie has usually just expired
+# by the time a refresh call happens.
+AUTH_COOKIE_NAMES = (
+    "bmc_gamer_token", "bmc_website_token", "bmc_admin_token", "bmc_super_admin_token",
+    "bmc_gamer_refresh", "bmc_website_refresh", "bmc_admin_refresh", "bmc_super_admin_refresh",
+)
 
 
 class OriginValidationMiddleware:

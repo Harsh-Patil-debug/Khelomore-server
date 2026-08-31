@@ -141,6 +141,75 @@ def check_is_admin(request):
     return False
 
 
+# Access-token cookie names (unchanged from before the access+refresh upgrade) plus their
+# new refresh-token counterparts, keyed by the same 4-way account bucket
+# (auth_handler._classify_account_bucket): 'super_admin', 'admin', 'website_user', 'gamer'.
+ACCESS_COOKIE_NAMES = {
+    "super_admin": "bmc_super_admin_token",
+    "admin": "bmc_admin_token",
+    "website_user": "bmc_website_token",
+    "gamer": "bmc_gamer_token",
+}
+REFRESH_COOKIE_NAMES = {
+    "super_admin": "bmc_super_admin_refresh",
+    "admin": "bmc_admin_refresh",
+    "website_user": "bmc_website_refresh",
+    "gamer": "bmc_gamer_refresh",
+}
+# All 4 refresh cookies are scoped to this one shared endpoint rather than "/" — the
+# browser then never attaches a refresh token to an ordinary API call, unlike the
+# access-token cookies (path="/"). Keeps the long-lived, most-sensitive credential off of
+# every request's cookie header except the one place it's actually needed.
+AUTH_REFRESH_PATH = "/api/v1/main/auth/refresh/"
+
+
+def _classify_cookie_bucket(is_admin, role, user_role=""):
+    """Same 4-way classification as auth_handler._classify_account_bucket, but also
+    considers user_role (the account's OWN stored role, from the decrypted response) —
+    matches this function's original inline form in BookMyConsoleVerifyOTPView, which can
+    differ from the request's own role/is_admin in edge cases (e.g. an existing account
+    whose stored role differs from what a bare login request happened to pass)."""
+    if user_role == "super_admin" or role == "super_admin":
+        return "super_admin"
+    if user_role == "admin" or role == "admin" or is_admin:
+        return "admin"
+    if user_role == "website_user" or role == "website_user":
+        return "website_user"
+    return "gamer"
+
+
+def _set_access_cookie(response, bucket, token):
+    response.set_cookie(
+        key=ACCESS_COOKIE_NAMES[bucket],
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite='None',
+        max_age=30 * 24 * 3600,
+    )
+
+
+def _set_refresh_cookie(response, bucket, token):
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAMES[bucket],
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite='None',
+        max_age=auth_handler._refresh_token_exp_seconds(bucket),
+        path=AUTH_REFRESH_PATH,
+    )
+
+
+def _clear_all_auth_cookies(response):
+    """Clears every access + refresh cookie across all 4 buckets — used on logout, and on
+    a failed refresh, so a browser never keeps sending a dead credential."""
+    for name in ACCESS_COOKIE_NAMES.values():
+        response.set_cookie(key=name, value='', max_age=0, httponly=True, secure=True, samesite='None')
+    for name in REFRESH_COOKIE_NAMES.values():
+        response.set_cookie(key=name, value='', max_age=0, httponly=True, secure=True, samesite='None', path=AUTH_REFRESH_PATH)
+
+
 def _parse_bool_flag(value):
     """
     Accepts either a native JSON boolean (website, DRF-parsed) or the string "true"/"false"
@@ -262,34 +331,22 @@ class BookMyConsoleVerifyOTPView(APIView):
                 decrypted = auth_handler.decrypt_data(result["encrypted_response"], result["iv"])
                 parsed = json.loads(decrypted)
                 token = parsed.get("token")
+                refresh_token = parsed.get("refresh_token")
                 user_role = parsed.get("user", {}).get("role", "")
-                
-                cookie_key = None
-                if user_role == "super_admin" or role == "super_admin":
-                    cookie_key = "bmc_super_admin_token"
-                elif user_role == "admin" or role == "admin" or check_is_admin(request):
-                    cookie_key = "bmc_admin_token"
-                elif user_role == "website_user" or role == "website_user":
-                    # Must NOT reuse bmc_gamer_token here — that name is also used for the
-                    # mobile app's role="user" sessions, and /auth/me/'s cookie-based
-                    # lookup-order heuristic uses the cookie's presence/name to decide
-                    # which collection to check first. Sharing the name meant a website
-                    # session could get misidentified as a mobile session and resolve
-                    # against the wrong (db.users) account if one happens to exist under
-                    # the same email — silently losing that account's saved phone number.
-                    cookie_key = "bmc_website_token"
-                else:
-                    cookie_key = "bmc_gamer_token"
 
-                if token and cookie_key:
-                    response_obj.set_cookie(
-                        key=cookie_key,
-                        value=token,
-                        httponly=True,
-                        secure=True,
-                        samesite='None',
-                        max_age=30 * 24 * 3600,
-                    )
+                # Must NOT let website_user collapse onto bmc_gamer_token — that name is
+                # also used for the mobile app's role="user" sessions, and /auth/me/'s
+                # cookie-based lookup-order heuristic uses the cookie's presence/name to
+                # decide which collection to check first. Sharing the name meant a website
+                # session could get misidentified as a mobile session and resolve against
+                # the wrong (db.users) account if one happens to exist under the same email
+                # — silently losing that account's saved phone number.
+                bucket = _classify_cookie_bucket(check_is_admin(request), role, user_role)
+
+                if token:
+                    _set_access_cookie(response_obj, bucket, token)
+                if refresh_token:
+                    _set_refresh_cookie(response_obj, bucket, refresh_token)
             except Exception as e:
                 print(f"[COOKIE ERROR] Failed to set auth cookie: {e}")
         return response_obj
@@ -520,20 +577,16 @@ class BookMyConsoleGoogleCallbackView(APIView):
                         decrypted = auth_handler.decrypt_data(response["encrypted_response"], response["iv"])
                         parsed = json.loads(decrypted)
                         token = parsed.get("token")
+                        refresh_token = parsed.get("refresh_token")
                         if token:
                             # role is always "website_user" here (mobile is handled by the
                             # `if is_mobile` branch above) — bmc_website_token, not
                             # bmc_gamer_token, so /auth/me/'s lookup order can tell this
                             # apart from a mobile-app gamer session. See the matching
                             # comment in BookMyConsoleVerifyOTPView for the bug this caused.
-                            response_obj.set_cookie(
-                                key='bmc_website_token',
-                                value=token,
-                                httponly=True,
-                                secure=True,
-                                samesite='None',
-                                max_age=30 * 24 * 3600,
-                            )
+                            _set_access_cookie(response_obj, "website_user", token)
+                        if refresh_token:
+                            _set_refresh_cookie(response_obj, "website_user", refresh_token)
                     except Exception as e:
                         print(f"[COOKIE ERROR] Failed to set Google bmc_website_token cookie: {e}")
 
@@ -1741,7 +1794,7 @@ class BookMyConsoleLogoutView(APIView):
         if auth_header and auth_header.startswith('Bearer '):
             token = auth_header.split(' ')[1].strip()
         else:
-            for cookie_name in ('bmc_gamer_token', 'bmc_website_token', 'bmc_admin_token', 'bmc_super_admin_token'):
+            for cookie_name in ACCESS_COOKIE_NAMES.values():
                 token = request.COOKIES.get(cookie_name)
                 if token:
                     break
@@ -1752,16 +1805,64 @@ class BookMyConsoleLogoutView(APIView):
             except Exception as e:
                 print(f"[LOGOUT] Token revocation failed: {e}")
 
+        # SECURITY: revoking only the access token leaves a still-valid refresh token
+        # behind, which could silently mint a fresh access token later even after
+        # "logging out" — revoke the whole refresh family too. Web clients carry it via a
+        # cookie; the mobile app (no cookie support) can send it explicitly in the body.
+        raw_refresh = None
+        for cookie_name in REFRESH_COOKIE_NAMES.values():
+            raw_refresh = request.COOKIES.get(cookie_name)
+            if raw_refresh:
+                break
+        if not raw_refresh:
+            raw_refresh = request.data.get('refresh_token', '')
+        if raw_refresh:
+            try:
+                auth_handler.revoke_refresh_family(raw_refresh)
+            except Exception as e:
+                print(f"[LOGOUT] Refresh-token revocation failed: {e}")
+
         response_obj = Response({"message": "Logout successful"}, status=status.HTTP_200_OK)
-        for cookie_name in ('bmc_gamer_token', 'bmc_website_token', 'bmc_admin_token', 'bmc_super_admin_token'):
-            response_obj.set_cookie(
-                key=cookie_name,
-                value='',
-                max_age=0,
-                httponly=True,
-                secure=True,
-                samesite='None',
-            )
+        _clear_all_auth_cookies(response_obj)
+        return response_obj
+
+
+class BookMyConsoleRefreshView(APIView):
+    """
+    POST /auth/refresh/
+    Body (optional): { refresh_token } — used by the mobile app, which has no cookie
+    support in its networking layer.
+    Reads whichever *_refresh cookie is present (checked in the same priority order as
+    authenticate_request's *_token cookie fallback: super_admin > admin > website_user >
+    gamer), or falls back to the body field, rotates it, and returns a fresh access token
+    (plus the new refresh token, for the mobile app to re-store) — setting both new
+    cookies for web clients along the way.
+    """
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    def post(self, request):
+        raw_refresh = None
+        hint_bucket = None
+        for bucket in ("super_admin", "admin", "website_user", "gamer"):
+            val = request.COOKIES.get(REFRESH_COOKIE_NAMES[bucket])
+            if val:
+                raw_refresh = val
+                hint_bucket = bucket
+                break
+        if not raw_refresh:
+            raw_refresh = request.data.get("refresh_token", "")
+
+        result = auth_handler.refresh_access_token(raw_refresh, expected_bucket=hint_bucket)
+        if not result:
+            response_obj = Response({"error": "Session expired. Please log in again."}, status=status.HTTP_401_UNAUTHORIZED)
+            _clear_all_auth_cookies(response_obj)
+            return response_obj
+
+        access_token, refresh_token, bucket = result
+        response_obj = Response({"token": access_token, "refresh_token": refresh_token}, status=status.HTTP_200_OK)
+        _set_access_cookie(response_obj, bucket, access_token)
+        _set_refresh_cookie(response_obj, bucket, refresh_token)
         return response_obj
 
 

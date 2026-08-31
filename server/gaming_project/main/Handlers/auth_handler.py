@@ -10,6 +10,7 @@ import pyotp
 import base64
 import hmac
 import hashlib
+import secrets
 import cloudinary
 import cloudinary.uploader
 from Crypto.Random import get_random_bytes
@@ -23,7 +24,7 @@ from dotenv import load_dotenv
 import random
 from .email_handler import send_admin_otp_email, send_sms_otp, send_welcome_email
 from bson.objectid import ObjectId
-from typing import Tuple, Any, Dict, List
+from typing import Tuple, Any, Dict, List, Optional
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from google.oauth2 import id_token
@@ -74,7 +75,21 @@ PLAYSTORE_REVIEWER_OTP   = os.getenv("PLAYSTORE_REVIEWER_OTP", "").strip()
 # Shorter-lived sessions for the cafe-owner and super-admin panels (playhub-command /
 # cafe-command-center) — these control real money/cafe data, so they shouldn't stay
 # logged in for the same 30 days as a casual gamer-app session.
+#
+# As of the access+refresh token upgrade (see "Refresh tokens" section below),
+# JWT_ADMIN_EXP_DELTA_SECONDS / JWT_EXP_DELTA_SECONDS no longer size the access token
+# itself for most roles — they now size the REFRESH token, preserving each role's
+# original "how long can you go without re-entering a password" duration exactly as
+# before. The access token users actually bear on every request is now the much shorter
+# ACCESS_TOKEN_EXP_SECONDS (OWASP-recommended short-lived bearer credential), EXCEPT for
+# the gamer/mobile-app "user" role, which deliberately keeps using its long-lived
+# JWT_EXP_DELTA_SECONDS value directly as the access token for now — the currently-shipped
+# mobile app binary has no refresh-token support, so shortening its access token today
+# would silently log out every already-installed copy of the app roughly every
+# ACCESS_TOKEN_EXP_SECONDS. Flip _classify_account_bucket's gamer case over to the short
+# lifetime as a deliberate follow-up once the updated app has enough Play Store adoption.
 JWT_ADMIN_EXP_DELTA_SECONDS = int(os.getenv("JWT_ADMIN_EXP_DELTA_SECONDS", "86400"))
+ACCESS_TOKEN_EXP_SECONDS = int(os.getenv("ACCESS_TOKEN_EXP_SECONDS", "1800"))  # 30 min
 ENCRYPTION_KEY        = base64.b64decode(os.getenv("ENCRYPTION_KEY", ""))
 IV                    = base64.b64decode(os.getenv("IV", ""))
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -274,9 +289,34 @@ def _ensure_revoked_tokens_index():
             pass
         _revoked_index_ensured = True
 
+def _classify_account_bucket(is_admin: bool = False, role: str = "") -> str:
+    """Canonical 4-way account bucket — deliberately kept in sync with
+    get_user_collection's own routing (same collection -> same bucket here) and with the
+    cookie-name selection logic in views.py's BookMyConsoleVerifyOTPView. One of
+    'super_admin', 'admin', 'website_user', 'gamer'."""
+    if role == "super_admin":
+        return "super_admin"
+    if role == "website_user":
+        return "website_user"
+    if role == "admin" or is_admin:
+        return "admin"
+    return "gamer"
+
+
+def _refresh_token_exp_seconds(bucket: str) -> int:
+    """The refresh token's lifetime is exactly what that bucket's access token lifetime
+    used to be, pre-access+refresh-split — so nobody's "stay logged in" duration changed,
+    only which token (access vs refresh) is the one carrying it."""
+    return JWT_ADMIN_EXP_DELTA_SECONDS if bucket in ("admin", "super_admin") else JWT_EXP_DELTA_SECONDS
+
+
 def generate_token(email: str, is_admin: bool = False, role: str = "") -> str:
-    is_panel_account = role in ("admin", "super_admin") or is_admin
-    exp_seconds = JWT_ADMIN_EXP_DELTA_SECONDS if is_panel_account else JWT_EXP_DELTA_SECONDS
+    bucket = _classify_account_bucket(is_admin, role)
+    # See the ACCESS_TOKEN_EXP_SECONDS comment above: every bucket except gamer now gets a
+    # short-lived access token backed by the new refresh-token layer below; gamer keeps its
+    # original long lifetime until the mobile app's refresh support has shipped and been
+    # adopted.
+    exp_seconds = JWT_EXP_DELTA_SECONDS if bucket == "gamer" else ACCESS_TOKEN_EXP_SECONDS
     payload = {
         'email': email,
         'jti': uuid.uuid4().hex,
@@ -320,6 +360,120 @@ def verify_token(token: str) -> str:
     if db_main.revoked_tokens.find_one({"jti": jti}):
         raise jwt.InvalidTokenError("Token has been revoked.")
     return payload['email']
+
+
+# ── Refresh tokens ────────────────────────────────────────────────────────────────────
+# Opaque (not a JWT) random tokens, stored server-side as a SHA-256 hash keyed by a
+# family_id — same "never store the raw secret" principle as this codebase's OTP hashing.
+# Every refresh call rotates: the presented token is marked used, a new one is issued
+# sharing the same family_id. A family_id ties together every token descended from one
+# original login, which is what makes reuse detection possible below. Role-agnostic by
+# design, matching generate_token/verify_token/revoke_token above — one implementation for
+# all 4 account buckets rather than 4 parallel ones.
+
+_refresh_index_ensured = False
+
+
+def _ensure_refresh_tokens_index():
+    """Lazily creates a TTL index so refresh-token records self-expire — same
+    setup-on-first-access pattern as _ensure_revoked_tokens_index above."""
+    global _refresh_index_ensured
+    if not _refresh_index_ensured:
+        try:
+            db_main.refresh_tokens.create_index("expires_at", expireAfterSeconds=0)
+        except Exception:
+            pass
+        _refresh_index_ensured = True
+
+
+def _hash_refresh_token(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def _issue_refresh_token(email: str, is_admin: bool, role: str, family_id: Optional[str] = None) -> str:
+    """Creates a new refresh-token doc and returns the RAW token (returned once, at
+    issuance — never logged, never stored anywhere else)."""
+    bucket = _classify_account_bucket(is_admin, role)
+    raw_token = secrets.token_urlsafe(48)
+    family_id = family_id or uuid.uuid4().hex
+    _ensure_refresh_tokens_index()
+    db_main.refresh_tokens.insert_one({
+        "token_hash": _hash_refresh_token(raw_token),
+        "email": email,
+        "is_admin": is_admin,
+        "role": role,
+        "bucket": bucket,
+        "family_id": family_id,
+        "used": False,
+        "created_at": datetime.now(IST).isoformat(),
+        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=_refresh_token_exp_seconds(bucket)),
+    })
+    return raw_token
+
+
+def issue_token_pair(email: str, is_admin: bool = False, role: str = ""):
+    """Issues a fresh (access_token, refresh_token) pair for a brand-new session — called
+    at OTP verification and Google sign-in."""
+    return generate_token(email, is_admin=is_admin, role=role), _issue_refresh_token(email, is_admin, role)
+
+
+def refresh_access_token(raw_refresh_token: str, expected_bucket: Optional[str] = None):
+    """
+    Validates + rotates a refresh token. Returns (access_token, refresh_token, bucket) on
+    success, None on any failure: unknown token, expired, bucket mismatch, or reuse of an
+    already-rotated token (which ALSO revokes the whole family — presenting an
+    already-spent refresh token is the standard signal that a copy of it was stolen: the
+    legitimate client and an attacker both tried to use the same one, and whichever used
+    it second is the tell).
+
+    expected_bucket, if given, is an extra cross-cookie confusion guard — e.g. a value
+    read from the bmc_admin_refresh cookie must actually belong to the admin bucket, not
+    have been swapped in from a different session.
+    """
+    if not raw_refresh_token:
+        return None
+    doc = db_main.refresh_tokens.find_one({"token_hash": _hash_refresh_token(raw_refresh_token)})
+    if not doc:
+        return None
+    bucket = doc.get("bucket") or _classify_account_bucket(doc.get("is_admin", False), doc.get("role", ""))
+    if expected_bucket is not None and bucket != expected_bucket:
+        return None
+
+    expires_at = doc.get("expires_at")
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at and datetime.now(timezone.utc) > expires_at:
+        return None
+
+    if doc.get("used"):
+        db_main.refresh_tokens.update_many(
+            {"family_id": doc["family_id"]},
+            {"$set": {"used": True, "revoked_reason": "reuse_detected"}},
+        )
+        return None
+
+    db_main.refresh_tokens.update_one({"_id": doc["_id"]}, {"$set": {"used": True}})
+    new_refresh = _issue_refresh_token(doc["email"], doc.get("is_admin", False), doc.get("role", ""), family_id=doc["family_id"])
+    new_access = generate_token(doc["email"], is_admin=doc.get("is_admin", False), role=doc.get("role", ""))
+    return new_access, new_refresh, bucket
+
+
+def revoke_refresh_family(raw_refresh_token: str) -> None:
+    """Revokes every token descended from the same login as raw_refresh_token — called on
+    logout, so a stolen-but-not-yet-used refresh token from that session stops working
+    immediately too, not just the current access token. Safe to call with an unknown or
+    malformed token (no-op)."""
+    if not raw_refresh_token:
+        return
+    doc = db_main.refresh_tokens.find_one({"token_hash": _hash_refresh_token(raw_refresh_token)})
+    if not doc:
+        return
+    db_main.refresh_tokens.update_many(
+        {"family_id": doc["family_id"]},
+        {"$set": {"used": True, "revoked_reason": "logout"}},
+    )
+
+
 def generate_totp_uri(email: str, secret: str) -> str:
     decrypted_secret = decrypt_secret_key(secret)
     return pyotp.totp.TOTP(decrypted_secret).provisioning_uri(name=email, issuer_name="Bloomora")
@@ -590,9 +744,10 @@ def bookmyconsole_verify_otp(email, otp_code, iv, is_admin=False, role=""):
         except Exception:
             pass
 
-    token = generate_token(dec_email, is_admin=is_admin, role=role)
+    access_token, refresh_token = issue_token_pair(dec_email, is_admin=is_admin, role=role)
     response_data = {
-        "token":   token,
+        "token":   access_token,
+        "refresh_token": refresh_token,
         "message": "Verification successful",
         "user": {
             "id":             str(user["_id"]),
@@ -839,9 +994,10 @@ def bookmyconsole_google_auth_code_verify(code: str, is_admin=False, role="", te
             coll.update_one({"_id": user["_id"]}, {"$set": {"full_name": full_name}})
             user["full_name"] = full_name
 
-        token = generate_token(email, is_admin=is_admin, role=role)
+        access_token, refresh_token = issue_token_pair(email, is_admin=is_admin, role=role)
         response_data = {
-            "token":   token,
+            "token":   access_token,
+            "refresh_token": refresh_token,
             "message": "Google login successful",
             "is_new":  is_new,
             "user": {

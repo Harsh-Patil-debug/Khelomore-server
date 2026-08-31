@@ -90,6 +90,7 @@ urlpatterns = [
     path('auth/delete-account/', BookMyConsoleDeleteAccountView.as_view(), name='auth_delete_account'),
     path('auth/logout/',     BookMyConsoleLogoutView.as_view(),    name='auth_logout'),
     path('auth/me/',         BookMyConsoleMeView.as_view(),        name='auth_me'),
+    path('auth/refresh/',    BookMyConsoleRefreshView.as_view(),   name='auth_refresh'),
 
     # ── Auth (Google — JWT direct, no OTP) ────────────────────────────────────
     path('auth/google/login/', BookMyConsoleGoogleLoginView.as_view(), name='auth_google_login'),
