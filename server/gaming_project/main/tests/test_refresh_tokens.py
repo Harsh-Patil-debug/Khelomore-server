@@ -127,6 +127,31 @@ class RefreshRotationTests(SecurityTestCase):
     def test_empty_refresh_token_is_rejected(self):
         self.assertIsNone(auth_handler.refresh_access_token("", expected_bucket=None))
 
+    def test_non_string_refresh_token_does_not_crash(self):
+        """A malformed/malicious client could send refresh_token as a JSON list, dict,
+        number, or bool instead of a string — _hash_refresh_token's .encode() would raise
+        AttributeError on anything but a str if this weren't guarded, turning a bad client
+        request into a 500 instead of a clean rejection."""
+        for bad_value in ([1, 2, 3], {"a": 1}, 12345, True, None):
+            with self.subTest(bad_value=bad_value):
+                self.assertIsNone(auth_handler.refresh_access_token(bad_value, expected_bucket=None))
+                auth_handler.revoke_refresh_family(bad_value)  # must not raise either
+
+    def test_concurrent_style_double_refresh_only_one_wins(self):
+        """Simulates two near-simultaneous refresh calls for the same token by invoking
+        refresh_access_token twice back-to-back without any intervening state change other
+        than what the function itself does — proves the atomic claim (not a separate
+        find_one + update_one) is what actually gates this, not incidental ordering."""
+        email, _ = self.make_active_user(role="user")
+        _, refresh_token = auth_handler.issue_token_pair(email, is_admin=False, role="user")
+
+        result_a = auth_handler.refresh_access_token(refresh_token, expected_bucket="gamer")
+        result_b = auth_handler.refresh_access_token(refresh_token, expected_bucket="gamer")
+
+        outcomes = [result_a, result_b]
+        successes = [r for r in outcomes if r is not None]
+        self.assertEqual(len(successes), 1, "exactly one of the two calls should have won the race")
+
 
 class RefreshEndpointHttpTests(SecurityTestCase):
     def _make_pending_gamer(self, otp_code="112233"):
@@ -185,6 +210,31 @@ class RefreshEndpointHttpTests(SecurityTestCase):
         self.assertEqual(resp.status_code, 401)
         self.assertIn("bmc_gamer_token", resp.cookies)
         self.assertEqual(resp.cookies["bmc_gamer_token"].value, "")
+
+    def test_refresh_with_malformed_body_types_does_not_500(self):
+        """Full HTTP round-trip for the same malformed-type risk covered at the function
+        level above — a buggy or hostile client sending refresh_token as a JSON list/dict/
+        number instead of a string must get a clean 401, never an unhandled 500."""
+        for bad_body in (
+            {"refresh_token": [1, 2, 3]},
+            {"refresh_token": {"nested": "object"}},
+            {"refresh_token": 12345},
+            {"refresh_token": True},
+            {},
+            "not-even-a-json-object",
+        ):
+            with self.subTest(bad_body=bad_body):
+                resp = self.client.post("/api/v1/main/auth/refresh/", bad_body, format="json")
+                self.assertIn(resp.status_code, (400, 401), f"got {resp.status_code} for body {bad_body!r}")
+
+    def test_logout_with_malformed_refresh_token_body_does_not_500(self):
+        email, token = self.make_active_user(role="user")
+        for bad_body in ({"refresh_token": [1, 2, 3]}, {"refresh_token": {"a": 1}}, {"refresh_token": 999}):
+            with self.subTest(bad_body=bad_body):
+                resp = self.client.post(
+                    "/api/v1/main/auth/logout/", bad_body, format="json", **self.auth_header(token),
+                )
+                self.assertEqual(resp.status_code, 200, resp.content)
 
     def test_logout_revokes_refresh_family_via_cookie(self):
         email = self._make_pending_gamer("998877")

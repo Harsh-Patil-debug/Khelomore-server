@@ -201,6 +201,20 @@ def _set_refresh_cookie(response, bucket, token):
     )
 
 
+def _get_body_str_field(request, field_name: str) -> str:
+    """Safely reads a string field out of request.data — DRF's parsed body isn't always a
+    dict: a client can POST a bare JSON string, list, or number as the entire body (still
+    valid JSON), which makes request.data a str/list/whatever instead. Calling .get() on
+    that directly raises AttributeError (an unhandled 500) rather than the clean rejection
+    a malformed request should get. Also guards against the field itself being present but
+    of the wrong type (e.g. refresh_token: [1,2,3]) — downstream code expects a string."""
+    data = request.data
+    if not isinstance(data, dict):
+        return ""
+    value = data.get(field_name, "")
+    return value if isinstance(value, str) else ""
+
+
 def _clear_all_auth_cookies(response):
     """Clears every access + refresh cookie across all 4 buckets — used on logout, and on
     a failed refresh, so a browser never keeps sending a dead credential."""
@@ -1815,7 +1829,7 @@ class BookMyConsoleLogoutView(APIView):
             if raw_refresh:
                 break
         if not raw_refresh:
-            raw_refresh = request.data.get('refresh_token', '')
+            raw_refresh = _get_body_str_field(request, 'refresh_token')
         if raw_refresh:
             try:
                 auth_handler.revoke_refresh_family(raw_refresh)
@@ -1851,7 +1865,7 @@ class BookMyConsoleRefreshView(APIView):
                 hint_bucket = bucket
                 break
         if not raw_refresh:
-            raw_refresh = request.data.get("refresh_token", "")
+            raw_refresh = _get_body_str_field(request, "refresh_token")
 
         result = auth_handler.refresh_access_token(raw_refresh, expected_bucket=hint_bucket)
         if not result:

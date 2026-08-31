@@ -420,8 +420,8 @@ def issue_token_pair(email: str, is_admin: bool = False, role: str = ""):
 def refresh_access_token(raw_refresh_token: str, expected_bucket: Optional[str] = None):
     """
     Validates + rotates a refresh token. Returns (access_token, refresh_token, bucket) on
-    success, None on any failure: unknown token, expired, bucket mismatch, or reuse of an
-    already-rotated token (which ALSO revokes the whole family — presenting an
+    success, None on any failure: unknown token, wrong type, expired, bucket mismatch, or
+    reuse of an already-rotated token (which ALSO revokes the whole family — presenting an
     already-spent refresh token is the standard signal that a copy of it was stolen: the
     legitimate client and an attacker both tried to use the same one, and whichever used
     it second is the tell).
@@ -429,30 +429,49 @@ def refresh_access_token(raw_refresh_token: str, expected_bucket: Optional[str] 
     expected_bucket, if given, is an extra cross-cookie confusion guard — e.g. a value
     read from the bmc_admin_refresh cookie must actually belong to the admin bucket, not
     have been swapped in from a different session.
+
+    SECURITY/ROBUSTNESS: the "claim" (mark used) is done with a single atomic
+    find_one_and_update rather than a separate find_one + update_one — the old two-step
+    version had a genuine TOCTOU race where two near-simultaneous refresh calls (a client
+    retrying a timed-out request, say) could both read used=False before either write
+    landed, both proceed to rotate, and neither trip reuse-detection. The bucket check is
+    folded into the same atomic filter so a client can never burn a token that doesn't
+    even belong to it; a failed claim falls back to a read-only lookup purely to decide
+    whether reuse-detection should fire (never to burn anything itself).
     """
-    if not raw_refresh_token:
+    if not raw_refresh_token or not isinstance(raw_refresh_token, str):
         return None
-    doc = db_main.refresh_tokens.find_one({"token_hash": _hash_refresh_token(raw_refresh_token)})
-    if not doc:
+    token_hash = _hash_refresh_token(raw_refresh_token)
+
+    claim_filter: Dict[str, Any] = {"token_hash": token_hash, "used": False}
+    if expected_bucket is not None:
+        claim_filter["bucket"] = expected_bucket
+
+    doc = db_main.refresh_tokens.find_one_and_update(claim_filter, {"$set": {"used": True}})
+    if doc is None:
+        existing = db_main.refresh_tokens.find_one({"token_hash": token_hash})
+        if not existing:
+            return None
+        if expected_bucket is not None and existing.get("bucket") != expected_bucket:
+            return None
+        if existing.get("used"):
+            db_main.refresh_tokens.update_many(
+                {"family_id": existing["family_id"]},
+                {"$set": {"used": True, "revoked_reason": "reuse_detected"}},
+            )
         return None
+
     bucket = doc.get("bucket") or _classify_account_bucket(doc.get("is_admin", False), doc.get("role", ""))
-    if expected_bucket is not None and bucket != expected_bucket:
-        return None
 
     expires_at = doc.get("expires_at")
     if expires_at and expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at and datetime.now(timezone.utc) > expires_at:
+        # Already claimed above (burned) — an expired token can never be validly reused
+        # regardless, and this keeps a second presentation of it consistent (it'll now
+        # correctly read as "already used" rather than "still expired-but-unclaimed").
         return None
 
-    if doc.get("used"):
-        db_main.refresh_tokens.update_many(
-            {"family_id": doc["family_id"]},
-            {"$set": {"used": True, "revoked_reason": "reuse_detected"}},
-        )
-        return None
-
-    db_main.refresh_tokens.update_one({"_id": doc["_id"]}, {"$set": {"used": True}})
     new_refresh = _issue_refresh_token(doc["email"], doc.get("is_admin", False), doc.get("role", ""), family_id=doc["family_id"])
     new_access = generate_token(doc["email"], is_admin=doc.get("is_admin", False), role=doc.get("role", ""))
     return new_access, new_refresh, bucket
@@ -461,9 +480,9 @@ def refresh_access_token(raw_refresh_token: str, expected_bucket: Optional[str] 
 def revoke_refresh_family(raw_refresh_token: str) -> None:
     """Revokes every token descended from the same login as raw_refresh_token — called on
     logout, so a stolen-but-not-yet-used refresh token from that session stops working
-    immediately too, not just the current access token. Safe to call with an unknown or
-    malformed token (no-op)."""
-    if not raw_refresh_token:
+    immediately too, not just the current access token. Safe to call with an unknown,
+    malformed, or wrong-type token (no-op)."""
+    if not raw_refresh_token or not isinstance(raw_refresh_token, str):
         return
     doc = db_main.refresh_tokens.find_one({"token_hash": _hash_refresh_token(raw_refresh_token)})
     if not doc:
