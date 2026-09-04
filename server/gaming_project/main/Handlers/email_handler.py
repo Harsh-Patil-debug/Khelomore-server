@@ -80,6 +80,13 @@ def send_otp_email(recipient: str, otp: str, gamertag: str = "PLAYER", purpose: 
     Sends a 6-digit OTP for login, signup, or password-reset verification.
     purpose: 'login' | 'signup' | 'password_reset' | 'verification'
     """
+    # SECURITY: gamertag is derived from a client-supplied name (a signup form, or a
+    # Google/Apple sign-in's real name) with no character restrictions, then interpolated
+    # directly into this HTML email below — escape it so a crafted name can't inject
+    # markup (fake links, spoofed content) into a transactional email, same reasoning as
+    # the booking-confirmation emails' user_name/cafe_name escaping elsewhere in this file.
+    gamertag = html.escape(gamertag or "PLAYER")
+
     # SECURITY: OTP codes must never hit server logs in production — anyone with log
     # access could otherwise authenticate as any user (including super admins) without
     # ever touching their inbox. Only print in local dev (DEBUG=True).
@@ -165,6 +172,10 @@ def send_otp_email(recipient: str, otp: str, gamertag: str = "PLAYER", purpose: 
 
 def send_welcome_email(recipient: str, gamertag: str = "PLAYER") -> bool:
     """Sends a welcome email after a player's account is verified and activated."""
+    # SECURITY: see send_otp_email's identical comment — gamertag is client-controlled
+    # (a signup form, or a Google/Apple sign-in's real name) with no character
+    # restrictions, and gets interpolated directly into this HTML email.
+    gamertag = html.escape(gamertag or "PLAYER")
     subject = "Welcome to BookMyConsole Gaming Hub ⚡"
 
     html_body = f"""
