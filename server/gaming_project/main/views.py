@@ -613,6 +613,41 @@ class BookMyConsoleGoogleCallbackView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+class BookMyConsoleAppleLoginView(APIView):
+    """
+    POST /auth/apple/
+    Body: { identity_token, full_name (optional — only present on Apple's very first
+    sign-in for this user, per expo-apple-authentication), terms_accepted (bool) }
+
+    Native Sign in with Apple. Unlike Google's redirect + authorization-code flow, Apple's
+    own SDK hands the app a ready-to-verify identity token directly on-device, so this is
+    one direct request/response round trip — no callback URL, no state param, no cookies
+    to set (mirrors how the mobile app's Google flow is consumed once it already has an
+    encrypted_response envelope, just without needing a browser redirect to get there).
+
+    Required so the App Store submission satisfies Guideline 4.8: any app offering a
+    third-party/social login (this app already offers Google) must also offer Sign in
+    with Apple as an equivalent option.
+    """
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    def post(self, request):
+        try:
+            data = request.data
+            identity_token = data.get("identity_token", "")
+            if not identity_token:
+                return Response({"error": "identity_token is required."}, status=status.HTTP_400_BAD_REQUEST)
+            full_name = data.get("full_name", "") or ""
+            terms_accepted = str(data.get("terms_accepted", "")).lower() in ("true", "1")
+            result, status_code = auth_handler.bookmyconsole_apple_auth_verify(
+                identity_token, full_name=full_name, terms_accepted=terms_accepted
+            )
+            return Response(result, status=status_code)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 class BookMyConsoleUpdatePhoneView(APIView):
     """
     POST /auth/update-phone/

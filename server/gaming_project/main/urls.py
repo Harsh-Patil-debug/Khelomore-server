@@ -96,6 +96,9 @@ urlpatterns = [
     path('auth/google/login/', BookMyConsoleGoogleLoginView.as_view(), name='auth_google_login'),
     path('auth/google/callback/', BookMyConsoleGoogleCallbackView.as_view(), name='auth_google_callback'),
 
+    # ── Auth (Apple — JWT direct, no OTP) ─────────────────────────────────────
+    path('auth/apple/', BookMyConsoleAppleLoginView.as_view(), name='auth_apple_login'),
+
     # ── Bookings ──────────────────────────────────────────────────────────────
     path('bookings/slots/',  BookedSlotsView.as_view(),        name='bookings_slots'),
 

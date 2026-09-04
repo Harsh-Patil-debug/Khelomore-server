@@ -2,6 +2,7 @@ import os
 import io
 import re
 import jwt
+from jwt import PyJWKClient
 import json
 import uuid
 import qrcode
@@ -1044,6 +1045,133 @@ def bookmyconsole_google_auth_code_verify(code: str, is_admin=False, role="", te
     except Exception as e:
         print(f"GOOGLE AUTH ERROR: {str(e)}")
         return {"error": f"Google login failed: {str(e)}"}, 500
+
+
+# Cached across requests — PyJWKClient fetches https://appleid.apple.com/auth/keys once
+# and keeps reusing/refreshing it internally, so this shouldn't hit Apple's endpoint on
+# every single sign-in.
+_apple_jwk_client = None
+
+
+def _get_apple_jwk_client() -> PyJWKClient:
+    global _apple_jwk_client
+    if _apple_jwk_client is None:
+        _apple_jwk_client = PyJWKClient("https://appleid.apple.com/auth/keys")
+    return _apple_jwk_client
+
+
+def bookmyconsole_apple_auth_verify(identity_token: str, full_name: str = "", is_admin=False, role="", terms_accepted=False):
+    """
+    Verifies a Sign in with Apple identity token and returns a BookMyConsole session.
+    Mirrors bookmyconsole_google_auth_code_verify's account-resolution logic exactly
+    (same get-or-create rules, same response shape) — the only real difference is how the
+    identity is obtained: Apple's own native SDK (expo-apple-authentication) hands the app
+    a ready-to-verify, already-signed JWT directly, so there's no authorization-code
+    exchange or redirect_uri involved like Google's web-based flow needs.
+
+    full_name is passed in separately from the token on purpose: Apple only ever includes
+    the user's real name in its native SDK response on their very FIRST sign-in ever (not
+    in the identity_token itself, and never again on subsequent sign-ins) — the client
+    captures it then and sends it along here so a brand-new account isn't stuck with no
+    name, but it's never something to re-derive from the token.
+    """
+    try:
+        signing_key = _get_apple_jwk_client().get_signing_key_from_jwt(identity_token)
+        claims = jwt.decode(
+            identity_token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=settings.APPLE_BUNDLE_ID,
+            issuer="https://appleid.apple.com",
+        )
+
+        email = (claims.get("email") or "").strip().lower()
+        # Apple's email_verified claim has been observed as either a real bool or the
+        # string "true" depending on token vintage — accept either rather than only bool.
+        email_verified = claims.get("email_verified") in (True, "true")
+        if not email or not email_verified:
+            return {"error": "Apple account email is not verified."}, 401
+
+        first_name = (full_name or "").strip().split(" ")[0] or "Player"
+        derived_gamertag = first_name.upper().replace(" ", "_")
+
+        coll = get_user_collection(is_admin, role)
+        if is_admin:
+            cafe_exists = db_main.cafes.find_one({"owner_email": email, "is_deleted": {"$ne": True}})
+            if not cafe_exists:
+                return {"error": "This email is not authorized. Please contact the platform Super Admin to list your cafe first."}, 403
+
+        user = coll.find_one({"email": email})
+
+        if user and user.get("status") in ("Blocked", "Suspended"):
+            return {"error": "This account has been suspended. Please contact support."}, 403
+
+        is_new = not user
+        if is_new:
+            # SECURITY: same consent gate as Google sign-in — see the matching comment in
+            # bookmyconsole_google_auth_code_verify for the exact reasoning.
+            is_cafe_owner_signup = (is_admin or role == "admin") and role != "super_admin"
+            if not is_cafe_owner_signup and role != "super_admin" and not terms_accepted:
+                return {"error": "You must accept the Terms & Conditions, Privacy Policy and Cancellation & Refund Policy to create an account."}, 400
+            new_apple_user_doc = {
+                "gamertag":      derived_gamertag,
+                "full_name":     full_name.strip() if full_name else "",
+                "email":         email,
+                "auth_provider": "apple",
+                "status":        "Active",
+                "xp":            150,
+                "rank":          "Recruit PRO I",
+                "createdAt":     datetime.now(IST),
+                "role":          role if role else ("admin" if is_admin else "user"),
+            }
+            if not is_cafe_owner_signup and role != "super_admin":
+                new_apple_user_doc["termsAccepted"] = True
+                new_apple_user_doc["privacyAccepted"] = True
+                new_apple_user_doc["cancellationPolicyAccepted"] = True
+            result = coll.insert_one(new_apple_user_doc)
+            user = coll.find_one({"_id": result.inserted_id})
+            try:
+                send_welcome_email(email, derived_gamertag)
+            except Exception as e:
+                print(f"WELCOME EMAIL ERROR: {str(e)}")
+        elif full_name and not user.get("full_name"):
+            # Unlike Google (which resends the real name on every sign-in, so it's kept in
+            # sync), Apple only ever gives a name once — only backfill a missing one, never
+            # overwrite an existing name with a later blank value.
+            coll.update_one({"_id": user["_id"]}, {"$set": {"full_name": full_name.strip()}})
+            user["full_name"] = full_name.strip()
+
+        access_token, refresh_token = issue_token_pair(email, is_admin=is_admin, role=role)
+        response_data = {
+            "token":   access_token,
+            "refresh_token": refresh_token,
+            "message": "Apple sign-in successful",
+            "is_new":  is_new,
+            "user": {
+                "id":             str(user["_id"]),
+                "email":          email,
+                "gamertag":       user.get("gamertag") or derived_gamertag,
+                "full_name":      user.get("full_name") or full_name,
+                "rank":           user.get("rank", "Recruit PRO I"),
+                "xp":             user.get("xp", 0),
+                "auth_provider":  user.get("auth_provider", "apple"),
+                "total_playtime": compute_total_playtime_hours(email),
+                "role":           user.get("role", "admin" if is_admin else "user"),
+                "phone":          decrypt_phone_field(user.get("phone", "")),
+            }
+        }
+
+        def _s(o):
+            if isinstance(o, ObjectId): return str(o)
+            if isinstance(o, datetime): return o.isoformat()
+            raise TypeError
+
+        enc_resp, iv2 = encrypt_data(json.dumps(response_data, default=_s), ENCRYPTION_KEY)
+        return {"encrypted_response": enc_resp, "iv": iv2}, 200
+
+    except Exception as e:
+        print(f"APPLE AUTH ERROR: {str(e)}")
+        return {"error": f"Apple sign-in failed: {str(e)}"}, 500
 
 
 def bookmyconsole_update_phone(email, phone_encrypted, iv, is_admin=False, role=""):

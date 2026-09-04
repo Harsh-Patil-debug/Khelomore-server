@@ -188,6 +188,11 @@ FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
 
+# Sign in with Apple — the identity token's `aud` claim must equal this exactly (it's the
+# app's own bundle ID for a native sign-in, not a web Services ID, since there's no
+# website-based Apple login here). Matches app.json's ios.bundleIdentifier.
+APPLE_BUNDLE_ID = os.getenv('APPLE_BUNDLE_ID', 'com.harshpatil.bookmyconsole')
+
 # Cashfree Keys — platform account (subscriptions, tournament entry with no cafe, and the
 # booking-payment fallback when a cafe hasn't connected its own account). CASHFREE_ENV
 # switches sandbox vs production for the whole payments module with one env var.
