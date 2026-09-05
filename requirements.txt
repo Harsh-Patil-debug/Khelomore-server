@@ -28,6 +28,14 @@ certifi==2024.8.30
 
 # ── Auth / crypto ─────────────────────────────
 PyJWT==2.10.1
+# PyJWT's RS256 verification (used to verify Apple's identity_token in
+# bookmyconsole_apple_auth_verify — Apple's own keys are RSA, never HMAC) delegates to
+# the `cryptography` package for the actual RSA math. PyJWT does not vendor this itself
+# and silently has no HS-family-only fallback for RS256 — without it, jwt.decode(...,
+# algorithms=["RS256"]) raises "Algorithm 'RS256' could not be found. Do you have
+# cryptography installed?" at call time, not at import time, so this was invisible until
+# a real Sign in with Apple attempt hit production.
+cryptography==43.0.3
 argon2-cffi==25.1.0
 pycryptodome==3.21.0
 pyotp==2.9.0
