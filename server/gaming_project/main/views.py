@@ -768,6 +768,7 @@ class BookingListCreateView(APIView):
 
         cafe_id = request.query_params.get("cafe_id") or request.query_params.get("cafeId")
         date = request.query_params.get("date")
+        mine_only = request.query_params.get("mine_only") == "true"
 
         if cafe_id:
             # SECURITY: cafe_id-scoped queries return every customer's bookings for that
@@ -776,7 +777,7 @@ class BookingListCreateView(APIView):
             if owner_error:
                 return owner_error
 
-        result, status_code = bookings_handler.get_user_bookings_handler(email, cafe_id=cafe_id, date=date)
+        result, status_code = bookings_handler.get_user_bookings_handler(email, cafe_id=cafe_id, date=date, mine_only=mine_only)
         return Response(result, status=status_code)
 
     def post(self, request):

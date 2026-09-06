@@ -646,11 +646,21 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
             "message": f"Failed to create booking: {str(e)}"
         }, 500
 
-def get_user_bookings_handler(user_email: str, cafe_id: str = None, date: str = None):
+def get_user_bookings_handler(user_email: str, cafe_id: str = None, date: str = None, mine_only: bool = False):
     """
     Fetches all bookings. If cafe_id is provided, fetches all bookings for that cafe.
     Otherwise, if the user is a Cafe Owner/Admin, fetches all bookings for their cafes.
     Otherwise, fetches all bookings made by this user email.
+
+    mine_only=True skips the super-admin/owner "see everything" branches entirely and
+    always scopes to just this account's own bookings, regardless of admin status. Set
+    by the "My Bookings" screen in the customer-facing mobile app (see BookedSlotsView's
+    sibling BookingListCreateView.get, called with ?mine_only=true) — without this, a
+    super admin or cafe owner opening the consumer app under their own account would have
+    every other customer's name/email/phone silently included in what's supposed to be
+    their own personal booking history. playhub-command's admin dashboard deliberately
+    calls this same endpoint WITHOUT the flag to get its real "all bookings" view, so this
+    must stay opt-in, not the default.
     """
     try:
         query = {}
@@ -660,6 +670,8 @@ def get_user_bookings_handler(user_email: str, cafe_id: str = None, date: str = 
         if cafe_id:
             query["cafe_id"] = cafe_id
             bookings = db_main.bookings.find(query).sort("createdAt", -1)
+        elif mine_only:
+            bookings = db_main.bookings.find({**query, "user_email": user_email}).sort("createdAt", -1)
         else:
             # Check if user is a super admin
             is_super_admin = False
