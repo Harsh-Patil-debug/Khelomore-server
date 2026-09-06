@@ -49,7 +49,14 @@ urlpatterns = [
     path('tournaments/<str:tournament_id>/register/', TournamentRegisterView.as_view(), name='register_tournament'),
 
     # ── Bookings ──────────────────────────────────────────────────────────────
+    # bookings/slots/ MUST come before bookings/<str:booking_id>/ — Django matches URL
+    # patterns in order, and the generic <str:booking_id> converter matches literally any
+    # segment including "slots", so with the old ordering every request to
+    # GET /bookings/slots/ was being routed to BookingDetailView(booking_id="slots")
+    # instead, which only defines put() — meaning this endpoint has been a 405
+    # "Method GET not allowed" dead end since it was first added, never actually reachable.
     path('bookings/', BookingListCreateView.as_view(), name='bookings'),
+    path('bookings/slots/',  BookedSlotsView.as_view(),        name='bookings_slots'),
     path('bookings/<str:booking_id>/', BookingDetailView.as_view(), name='booking_detail'),
 
     # ── Hardware Rigs ─────────────────────────────────────────────────────────
@@ -98,9 +105,6 @@ urlpatterns = [
 
     # ── Auth (Apple — JWT direct, no OTP) ─────────────────────────────────────
     path('auth/apple/', BookMyConsoleAppleLoginView.as_view(), name='auth_apple_login'),
-
-    # ── Bookings ──────────────────────────────────────────────────────────────
-    path('bookings/slots/',  BookedSlotsView.as_view(),        name='bookings_slots'),
 
     # ── Sessions ──────────────────────────────────────────────────────────────
     path('sessions/', SessionListCreateView.as_view(), name='sessions'),
