@@ -748,10 +748,11 @@ class BookedSlotsView(APIView):
         cafe_id = request.query_params.get("cafe_id")
         zone = request.query_params.get("zone")
         date = request.query_params.get("date")
+        rig = request.query_params.get("rig")
         if not cafe_id or not zone or not date:
             return Response({"error": "Missing parameters"}, status=status.HTTP_400_BAD_REQUEST)
-        
-        result, status_code = bookings_handler.get_booked_slots_handler(cafe_id, zone, date)
+
+        result, status_code = bookings_handler.get_booked_slots_handler(cafe_id, zone, date, rig=rig)
         return Response(result, status=status_code)
 
 

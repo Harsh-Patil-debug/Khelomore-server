@@ -99,9 +99,21 @@ def calculate_booking_status_and_time(date_str: str, slots: list, db_status: str
         print(f"Error parsing slot times: {str(e)}")
         return db_status, 0
 
-def get_booked_slots_handler(cafe_id: str, zone: str, date: str):
+def _normalize_rig_name(rig: str) -> str:
+    """Same normalization check_slot_conflict uses to match a booking's stored `rig`
+    string (e.g. "PC #02 · RTX 4090 · 360Hz") against just the unit name a caller passes
+    in (e.g. "PC #02") — strips the spec suffix and collapses whitespace/bullet variants
+    so both sides compare on the unit name alone."""
+    return (rig or "").replace("•", "·").replace("  ", " ").split("·")[0].strip()
+
+
+def get_booked_slots_handler(cafe_id: str, zone: str, date: str, rig: "str | None" = None):
     """
-    Returns a list of all booked slot strings for a given cafe, zone, and date.
+    Returns a list of booked slot strings for a given cafe, zone, and date. If `rig` is
+    given, scoped to just that specific unit (matching check_slot_conflict's per-rig
+    check exactly) — without this, a slot booked on one unit would incorrectly show as
+    unavailable for every other free unit in the same zone. Falls back to zone-wide
+    (every unit merged together) only when no specific rig is selected yet.
     """
     try:
         bookings = db_main.bookings.find({
@@ -110,15 +122,18 @@ def get_booked_slots_handler(cafe_id: str, zone: str, date: str):
             "date": date,
             "status": {"$in": ["Upcoming", "Active"]}
         })
-        
+
+        clean_req_rig = _normalize_rig_name(rig) if rig else None
         booked_slots = []
         for b in bookings:
+            if clean_req_rig and _normalize_rig_name(b.get("rig", "")) != clean_req_rig:
+                continue
             slots_list = b.get("slots", [])
             if isinstance(slots_list, list):
                 booked_slots.extend(slots_list)
             elif isinstance(slots_list, str):
                 booked_slots.extend([s.strip() for s in slots_list.split(",") if s.strip()])
-                
+
         return {
             "status": "success",
             "booked_slots": list(set(booked_slots))
@@ -145,9 +160,9 @@ def check_slot_conflict(cafe_id: str, date: str, zone: "str | None", slots: list
     }))
 
     if rig:
-        clean_req_rig = rig.replace("•", "·").replace("  ", " ").split("·")[0].strip()
+        clean_req_rig = _normalize_rig_name(rig)
         for b in existing_bookings:
-            b_rig = b.get("rig", "").replace("•", "·").replace("  ", " ").split("·")[0].strip()
+            b_rig = _normalize_rig_name(b.get("rig", ""))
             if b_rig == clean_req_rig:
                 b_slots = b.get("slots", [])
                 overlapping = [s for s in slots if s in b_slots]
