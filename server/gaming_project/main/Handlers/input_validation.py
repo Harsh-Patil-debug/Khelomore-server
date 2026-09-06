@@ -12,11 +12,12 @@ import re
 from urllib.parse import urlparse
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-# Loosely permissive: optional leading +, 7-15 digits total, spaces/dashes/parens allowed
-# between digits. This intentionally does not enforce a specific country's format — the
-# platform has international users — it just rejects obvious garbage.
-PHONE_RE = re.compile(r"^\+?[\d\s().-]{7,20}$")
-PHONE_DIGIT_COUNT_RE = re.compile(r"\d")
+# Indian mobile numbers only — every cafe on this platform is in India, and this is the
+# number tournament/slot SMS alerts need to actually reach. Optional +91/91 prefix, then
+# exactly 10 digits starting 6-9 (India's real mobile numbering plan; 0-5 is landline).
+# Matches PHONE_RE in mobile/src/lib/validation.ts exactly.
+PHONE_SEPARATORS_RE = re.compile(r"[\s().-]")
+PHONE_RE = re.compile(r"^(?:\+?91)?[6-9]\d{9}$")
 
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 128
@@ -37,9 +38,9 @@ def validate_phone(phone: str, required: bool = True) -> str | None:
         return "A valid phone number is required." if required else None
     if not isinstance(phone, str):
         return "Please enter a valid phone number."
-    digit_count = len(PHONE_DIGIT_COUNT_RE.findall(phone))
-    if digit_count < 7 or digit_count > 15 or not PHONE_RE.match(phone.strip()):
-        return "Please enter a valid phone number (7-15 digits)."
+    cleaned = PHONE_SEPARATORS_RE.sub("", phone.strip())
+    if not PHONE_RE.match(cleaned):
+        return "Please enter a valid 10-digit mobile number."
     return None
 
 
