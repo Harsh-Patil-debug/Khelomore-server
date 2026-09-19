@@ -1379,6 +1379,17 @@ class CafeWalletTopupConfirmView(APIView):
         return Response(response, status=status_code)
 
 
+class CafeWalletTopupReconcileView(APIView):
+    """POST /cafes/<cafe_id>/wallet/topup/reconcile/ — credits any paid-but-unconfirmed
+    recent top-ups for the logged-in customer at this cafe."""
+    def post(self, request, cafe_id):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+        response, status_code = wallet.reconcile_pending_topups_handler(email, cafe_id)
+        return Response(response, status=status_code)
+
+
 class MyWalletsView(APIView):
     """GET /wallet/mine/ — every cafe where the logged-in customer holds a positive BC
     Coin balance (mobile Profile → 'My Wallets' list). Not cafe-scoped, unlike the other

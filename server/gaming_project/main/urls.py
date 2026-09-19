@@ -39,6 +39,7 @@ urlpatterns = [
     path('cafes/<str:cafe_id>/wallet/transactions/', CafeWalletTransactionsView.as_view(), name='cafe_wallet_transactions'),
     path('cafes/<str:cafe_id>/wallet/topup/create-order/', CafeWalletTopupOrderCreateView.as_view(), name='cafe_wallet_topup_create_order'),
     path('cafes/<str:cafe_id>/wallet/topup/confirm/', CafeWalletTopupConfirmView.as_view(), name='cafe_wallet_topup_confirm'),
+    path('cafes/<str:cafe_id>/wallet/topup/reconcile/', CafeWalletTopupReconcileView.as_view(), name='cafe_wallet_topup_reconcile'),
     path('cafes/<str:cafe_id>/wallet/summary/', CafeWalletSummaryView.as_view(), name='cafe_wallet_summary'),
 
     # ── Subscriptions (₹1599/month cafe-owner platform fee) ──────────────────────

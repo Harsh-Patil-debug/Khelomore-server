@@ -118,6 +118,16 @@ def create_wallet_topup_order_handler(user_email: str, cafe_id: str, amount_in_i
             "created_at": datetime.now(IST),
             "completed_at": None,
         })
+        # verify_cashfree_payment(cafe_id=...) resolves which Cashfree account created an
+        # order (and that it belongs to this cafe) from cafe_payment_orders — without a
+        # record here, verification always fails. No hold_* fields: a top-up holds no slot.
+        db_main.cafe_payment_orders.insert_one({
+            "order_id": order["order_id"],
+            "cafe_id": str(cafe_id),
+            "used_platform_fallback": used_platform_fallback,
+            "purpose": "wallet_topup",
+            "hold_token": None,
+        })
 
     order["used_platform_fallback"] = used_platform_fallback
     return {"status": "success", **order}, 200
@@ -239,6 +249,28 @@ def get_my_wallet_transactions_handler(user_email: str, kind: str = "all"):
         item["cafeName"] = names.get(t["cafe_id"]) or "Unknown cafe"
         out.append(item)
     return {"status": "success", "transactions": out}, 200
+
+
+def reconcile_pending_topups_handler(user_email: str, cafe_id: str):
+    """Credits any of this customer's recent still-pending top-ups at this cafe that
+    Cashfree actually shows as PAID — covers the app being killed/backgrounded after
+    paying but before the confirm call landed. Safe to call repeatedly: an unpaid order
+    just fails verification without side effects (verify only claims an order on
+    success), and confirm_wallet_topup_handler is idempotent."""
+    _ensure_wallet_indexes()
+    since = datetime.now(IST) - timedelta(hours=24)
+    pending = list(
+        db_main.wallet_topup_orders.find(
+            {"user_email": user_email, "cafe_id": str(cafe_id), "status": "pending", "created_at": {"$gte": since}}
+        ).sort("created_at", -1).limit(5)
+    )
+    credited = 0
+    for o in pending:
+        resp, code = confirm_wallet_topup_handler(user_email, cafe_id, o["order_id"])
+        if code == 200 and resp.get("status") == "success":
+            credited += 1
+    balance_resp, _ = get_wallet_balance_handler(user_email, cafe_id)
+    return {"status": "success", "credited": credited, "balance": balance_resp["balance"]}, 200
 
 
 def get_cafe_wallet_summary_handler(cafe_id: str):

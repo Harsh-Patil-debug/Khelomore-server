@@ -441,6 +441,10 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
         # full TTL even though this specific attempt is already dead and never retried.
         order_record = db_main.cafe_payment_orders.find_one({"order_id": cashfree_order_id, "cafe_id": cafe_id})
         hold_token = order_record.get("hold_token") if order_record else None
+        if order_record and order_record.get("purpose") == "wallet_topup":
+            # A wallet top-up order is only ever redeemable as a top-up (see
+            # wallet.confirm_wallet_topup_handler), never as a booking payment.
+            return {"status": "error", "message": "This payment can't be used for a booking."}, 402
 
         # Server-side source of truth for this cafe's current best price — never trusted
         # from the client. The mobile app displays/pays this exact same computed total
