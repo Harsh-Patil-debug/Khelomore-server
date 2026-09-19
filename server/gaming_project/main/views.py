@@ -12,7 +12,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.throttling import ScopedRateThrottle
-from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, payouts, auth_handler, bookings_handler, auth_middleware, favorites, sessions, offers, users, partner_applications, subscriptions, notifications, support
+from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, payouts, auth_handler, bookings_handler, auth_middleware, favorites, sessions, offers, users, partner_applications, subscriptions, notifications, support, wallet
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
@@ -813,6 +813,10 @@ class BookingListCreateView(APIView):
             cashfree_order_id   = data.get("cashfree_order_id"),
             coupon_code         = data.get("coupon_code"),
             offer_id            = data.get("offer_id"),
+            # use_wallet is only a flag — how many BC Coins actually get spent is always
+            # sized server-side from this cafe's real wallet balance (see
+            # create_booking_handler), never from anything the client computes.
+            use_wallet          = bool(data.get("use_wallet") or data.get("useWallet")),
         )
         return Response(result, status=status_code)
 
@@ -1323,6 +1327,90 @@ class CafeBookingReleaseHoldView(APIView):
             return Response({"status": "error", "message": "Missing 'order_id' parameter"}, status=status.HTTP_400_BAD_REQUEST)
         payments.release_cafe_booking_hold(cafe_id, order_id)
         return Response({"status": "success"}, status=status.HTTP_200_OK)
+
+
+class CafeWalletBalanceView(APIView):
+    """GET /cafes/<cafe_id>/wallet/balance/ — the logged-in customer's own BC Coin
+    balance at this specific cafe (0 if they've never topped up here)."""
+    def get(self, request, cafe_id):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+        response, status_code = wallet.get_wallet_balance_handler(email, cafe_id)
+        return Response(response, status=status_code)
+
+
+class CafeWalletTransactionsView(APIView):
+    """GET /cafes/<cafe_id>/wallet/transactions/ — the logged-in customer's own top-up/
+    spend history at this cafe."""
+    def get(self, request, cafe_id):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+        response, status_code = wallet.get_wallet_transactions_handler(email, cafe_id)
+        return Response(response, status=status_code)
+
+
+class CafeWalletTopupOrderCreateView(APIView):
+    """POST /cafes/<cafe_id>/wallet/topup/create-order/ — Create a real Cashfree order to
+    top up this cafe's wallet. Body: {amount}."""
+    def post(self, request, cafe_id):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+        amount = request.data.get("amount")
+        if amount is None:
+            return Response({"status": "error", "message": "Missing 'amount' parameter"}, status=status.HTTP_400_BAD_REQUEST)
+        response, status_code = wallet.create_wallet_topup_order_handler(email, cafe_id, amount)
+        return Response(response, status=status_code)
+
+
+class CafeWalletTopupConfirmView(APIView):
+    """POST /cafes/<cafe_id>/wallet/topup/confirm/ — Verifies a just-completed Cashfree
+    top-up order and credits the wallet. Body: {order_id}."""
+    def post(self, request, cafe_id):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+        order_id = request.data.get("order_id")
+        if not order_id:
+            return Response({"status": "error", "message": "Missing 'order_id' parameter"}, status=status.HTTP_400_BAD_REQUEST)
+        response, status_code = wallet.confirm_wallet_topup_handler(email, cafe_id, order_id)
+        return Response(response, status=status_code)
+
+
+class MyWalletsView(APIView):
+    """GET /wallet/mine/ — every cafe where the logged-in customer holds a positive BC
+    Coin balance (mobile Profile → 'My Wallets' list). Not cafe-scoped, unlike the other
+    wallet endpoints, since its whole point is showing balances ACROSS cafes."""
+    def get(self, request):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+        response, status_code = wallet.get_my_wallets_handler(email)
+        return Response(response, status=status_code)
+
+
+class MyWalletTransactionsView(APIView):
+    """GET /wallet/transactions/?type=all|topup|spend — the customer's BC Coin activity
+    across every cafe (mobile Wallet page → Recent Transactions)."""
+    def get(self, request):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+        response, status_code = wallet.get_my_wallet_transactions_handler(email, request.query_params.get("type", "all"))
+        return Response(response, status=status_code)
+
+
+class CafeWalletSummaryView(APIView):
+    """GET /cafes/<cafe_id>/wallet/summary/ — Cafe owner/super admin view of total
+    outstanding wallet liability + the per-customer balance list for this cafe."""
+    def get(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        response, status_code = wallet.get_cafe_wallet_summary_handler(cafe_id)
+        return Response(response, status=status_code)
 
 
 class CafePayoutBeneficiaryView(APIView):

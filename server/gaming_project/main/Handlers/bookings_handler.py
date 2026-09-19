@@ -1,11 +1,21 @@
 import random
 from datetime import datetime, timezone, timedelta
 from bson.objectid import ObjectId
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError, OperationFailure, BulkWriteError
 from .db_connection import db_main, get_client
 from .email_handler import send_booking_confirmation_email, send_booking_admin_notification_email
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+class _WalletInsufficientBalance(Exception):
+    """Raised INSIDE the booking transaction (see create_booking_handler) when a wallet
+    debit's conditional update finds the balance no longer covers wallet_portion — the
+    balance changed between the pre-check that sized wallet_portion/cashfree_portion and
+    this atomic debit, a genuine concurrent-spend race. Raising here aborts the whole
+    transaction, so no slot lock or booking survives a debit that didn't actually happen."""
+    pass
 
 _slot_locks_index_ensured = False
 
@@ -321,7 +331,7 @@ def _resolve_hourly_price(cafe_id, rig_name=None):
     return 150
 
 
-def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: str, date: str, slots: list, rig: "str | None" = None, user_name: "str | None" = None, user_phone: str = "", cashfree_order_id: "str | None" = None, coupon_code: "str | None" = None, offer_id: "str | None" = None):
+def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: str, date: str, slots: list, rig: "str | None" = None, user_name: "str | None" = None, user_phone: str = "", cashfree_order_id: "str | None" = None, coupon_code: "str | None" = None, offer_id: "str | None" = None, use_wallet: bool = False):
     """
     Validates slot availability and saves the booking record.
     Price is always computed server-side from the cafe/rig's hourly rate — a client-supplied
@@ -446,10 +456,24 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
                 release_slot_hold(cafe_id, date, rig, slots, hold_token)
             return {"status": "error", "message": price_error}, 400
 
+        # Wallet split: this cafe's own BC Coins may cover some or all of total_price,
+        # with any remainder verified via Cashfree as usual. wallet_portion is always
+        # sized from the ACTUAL current balance read here — use_wallet is only a flag,
+        # never a client-supplied coin amount, so a stale/tampered client value can never
+        # over-claim wallet credit. The atomic debit itself happens later, inside the
+        # final transaction below, alongside the slot claim and booking insert — this
+        # read is only for sizing how much Cashfree verification (if any) to require.
+        wallet_portion = 0
+        if use_wallet and total_price > 0:
+            wallet_doc = db_main.wallet_balances.find_one({"user_email": user_email, "cafe_id": cafe_id})
+            available_balance = int(wallet_doc["balance"]) if wallet_doc else 0
+            wallet_portion = min(available_balance, total_price)
+        cashfree_portion = total_price - wallet_portion
+
         payment_settlement = None
-        if total_price > 0:
+        if cashfree_portion > 0:
             from .payments import verify_cashfree_payment
-            if not verify_cashfree_payment(cashfree_order_id, total_price * 100, cafe_id=cafe_id):
+            if not verify_cashfree_payment(cashfree_order_id, cashfree_portion * 100, cafe_id=cafe_id):
                 if hold_token:
                     release_slot_hold(cafe_id, date, rig, slots, hold_token)
                 return {
@@ -466,7 +490,7 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
             # fresh — this is what makes the payment step's atomic claim into the final,
             # decisive one, not just another read-then-hope check.
         else:
-            payment_status = "paid"  # free slot, nothing owed
+            payment_status = "paid"  # free slot, or fully covered by wallet — nothing owed via Cashfree
 
         # 3. Group slots into contiguous blocks and save each block as a separate booking document
         parsed_slots = []
@@ -501,10 +525,11 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
         for group in slot_groups:
             group_slots = [item[2] for item in group]
             group_price = int(total_price * len(group_slots) / len(slots))
+            group_wallet_used = int(wallet_portion * len(group_slots) / len(slots)) if wallet_portion else 0
             group_code = str(random.randint(100000, 999999))
-            
+
             group_status, group_remaining = calculate_booking_status_and_time(date, group_slots)
-            
+
             doc = {
                 "user_email": user_email,
                 "user_name": user_name,
@@ -516,6 +541,10 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
                 "slots": group_slots,
                 "slot": ", ".join(group_slots),
                 "price": group_price,
+                # Non-refundable BC Coin portion of group_price — kept separate so any
+                # future Cashfree-refund feature refunds only (group_price -
+                # wallet_portion_used), never the wallet-funded share (see Handlers/wallet.py).
+                "wallet_portion_used": group_wallet_used,
                 "code": group_code,
                 "rig": rig,
                 "status": group_status,
@@ -547,9 +576,26 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
         if client is None:
             return {"status": "error", "message": "Database connection unavailable."}, 500
 
+        debited = None
         try:
             with client.start_session() as session:
                 with session.start_transaction():
+                    if wallet_portion > 0:
+                        # Atomic, race-safe debit: succeeds only if the balance still
+                        # covers wallet_portion AT THIS EXACT INSTANT — this is the real
+                        # source of truth, not the pre-check above (which only sized the
+                        # Cashfree remainder). Wrapped in the same transaction as the slot
+                        # claim and booking insert so a debit, a slot, and a booking row
+                        # all live or die together.
+                        debited = db_main.wallet_balances.find_one_and_update(
+                            {"user_email": user_email, "cafe_id": cafe_id, "balance": {"$gte": wallet_portion}},
+                            {"$inc": {"balance": -wallet_portion}, "$set": {"updated_at": datetime.now(IST)}},
+                            session=session,
+                            return_document=ReturnDocument.AFTER,
+                        )
+                        if debited is None:
+                            raise _WalletInsufficientBalance()
+
                     for s in slots:
                         lock_key = {"cafe_id": cafe_id, "rig": clean_rig_key, "date": date, "slot": s}
                         confirmed = None
@@ -568,6 +614,49 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
                     else:
                         result = db_main.bookings.insert_one(inserted_bookings[0], session=session)
                         inserted_bookings[0]["_id"] = result.inserted_id
+
+                    if wallet_portion > 0:
+                        # Ledger row lives in the SAME transaction as the debit and the
+                        # booking insert — balance and ledger can never drift apart, and
+                        # this can never be recorded without a real booking existing.
+                        # debited is always set here: this branch only runs when
+                        # wallet_portion > 0, and the debit block above (the same guard)
+                        # either populated it or raised _WalletInsufficientBalance, which
+                        # would have aborted the transaction before reaching this line.
+                        assert debited is not None
+                        db_main.wallet_transactions.insert_one({
+                            "user_email": user_email,
+                            "cafe_id": cafe_id,
+                            "type": "spend",
+                            "amount": wallet_portion,
+                            "balance_after": debited["balance"],
+                            "order_id": None,
+                            "booking_ids": [str(doc["_id"]) for doc in inserted_bookings],
+                            "settlement": None,
+                            "created_at": datetime.now(IST),
+                        }, session=session)
+        except _WalletInsufficientBalance:
+            # The balance covered wallet_portion at the pre-check above but no longer does
+            # by the time this transaction ran — someone else spent it in between. The
+            # whole transaction rolled back: no debit, no slot claim, no booking exists.
+            if hold_token:
+                release_slot_hold(cafe_id, date, rig, slots, hold_token)
+            if cashfree_portion > 0:
+                # A Cashfree remainder was already verified/captured before we ever got
+                # here — same residual gap this file already accepts for a slot lost to a
+                # concurrent booking after payment (see the DuplicateKeyError branch
+                # below), just triggered by a wallet race instead of a slot race.
+                return {
+                    "status": "error",
+                    "message": (
+                        "Your wallet balance changed and this booking's payment was already "
+                        "captured — contact support for a refund, and please try a different slot."
+                    ),
+                }, 409
+            return {
+                "status": "error",
+                "message": "Your wallet balance changed just now — please try again.",
+            }, 409
         except (DuplicateKeyError, OperationFailure) as e:
             # Inside a transaction, a duplicate-key write error on slot_locks doesn't
             # surface as a bare DuplicateKeyError — pymongo wraps it in OperationFailure/
@@ -597,6 +686,18 @@ def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: 
                         "That station/slot was just booked by someone else. Your payment was "
                         "captured — contact support for a refund, and please try a different slot."
                     ),
+                }, 409
+            # MongoDB's own concurrency control can raise a WriteConflict (error 112, not
+            # 11000) when two of these transactions touch the SAME document at the same
+            # instant — e.g. two concurrent bookings both spending from the same wallet
+            # balance doc. This is transient and retriable, not an infra failure: nothing
+            # was written by either side, so surface it as the same clean "try again" a
+            # real conflict gets, not a raw 500. Confirmed live: a concurrent wallet-debit
+            # race test hits this exact path (see Handlers/wallet.py's docstring).
+            if e.has_error_label("TransientTransactionError"):
+                return {
+                    "status": "error",
+                    "message": "That couldn't be confirmed right now — please try again.",
                 }, 409
             # Transactions require a replica set (true for MongoDB Atlas, which this
             # project uses) — if that's ever not the case, fail loudly rather than

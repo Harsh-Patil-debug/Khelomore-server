@@ -32,6 +32,15 @@ urlpatterns = [
     path('cafes/<str:cafe_id>/payouts/beneficiary/', CafePayoutBeneficiaryView.as_view(), name='cafe_payout_beneficiary'),
     path('cafes/<str:cafe_id>/payouts/settle/', CafePayoutSettleView.as_view(), name='cafe_payout_settle'),
 
+    # ── Wallet (per-cafe BC Coins) ────────────────────────────────────────────────
+    path('wallet/mine/', MyWalletsView.as_view(), name='my_wallets'),
+    path('wallet/transactions/', MyWalletTransactionsView.as_view(), name='my_wallet_transactions'),
+    path('cafes/<str:cafe_id>/wallet/balance/', CafeWalletBalanceView.as_view(), name='cafe_wallet_balance'),
+    path('cafes/<str:cafe_id>/wallet/transactions/', CafeWalletTransactionsView.as_view(), name='cafe_wallet_transactions'),
+    path('cafes/<str:cafe_id>/wallet/topup/create-order/', CafeWalletTopupOrderCreateView.as_view(), name='cafe_wallet_topup_create_order'),
+    path('cafes/<str:cafe_id>/wallet/topup/confirm/', CafeWalletTopupConfirmView.as_view(), name='cafe_wallet_topup_confirm'),
+    path('cafes/<str:cafe_id>/wallet/summary/', CafeWalletSummaryView.as_view(), name='cafe_wallet_summary'),
+
     # ── Subscriptions (₹1599/month cafe-owner platform fee) ──────────────────────
     path('cafes/<str:cafe_id>/subscription/', CafeSubscriptionDetailView.as_view(), name='cafe_subscription'),
     path('cafes/<str:cafe_id>/subscription/create-order/', CafeSubscriptionOrderView.as_view(), name='cafe_subscription_order'),
