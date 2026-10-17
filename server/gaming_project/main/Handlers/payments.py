@@ -240,7 +240,7 @@ def create_cashfree_order_handler(amount_in_inr, customer_email=None, customer_p
         }
 
 
-def create_cafe_booking_order_handler(cafe_id, amount_in_inr, zone=None, date=None, slots=None, rig=None, user_email=None):
+def create_cafe_booking_order_handler(cafe_id, amount_in_inr, zone=None, date=None, slots=None, rig=None, user_email=None, rig_ids=None, start_time=None, duration_minutes=None):
     """
     Creates a Cashfree order for a booking at a specific cafe, using that cafe's own
     Cashfree account if the owner has configured one (cafe-command-center → Cafe
@@ -251,13 +251,15 @@ def create_cafe_booking_order_handler(cafe_id, amount_in_inr, zone=None, date=No
     lets bookings_handler stamp "settled directly to cafe" vs "held by platform, needs
     payout" onto the resulting booking.
 
-    zone/date/slots/rig are only passed for slot-booking payments (never tournament
-    entry, which has no slot). When present, this atomically HOLDS those exact slots
-    before the Cashfree order is even created — see hold_slots_for_payment. That's what
-    actually stops "pay in full for a slot someone else already took, then get told to
-    contact support for a refund": the slot is claimed the instant checkout starts, not
-    just soft-checked and hoped-for, so a losing concurrent request is rejected here,
-    before it ever reaches Cashfree, instead of after paying.
+    zone/date/slots/rig are the OLD fixed-hourly-slot booking's hold params; rig_ids/
+    start_time/duration_minutes are the NEW flexible-duration group booking's — exactly
+    one set is populated per call, never both, depending on which model the mobile
+    checkout is using. When either is present, this atomically HOLDS the requested
+    window before the Cashfree order is even created (hold_slots_for_payment /
+    hold_rigs_for_payment) — that's what actually stops "pay in full for a slot someone
+    else already took, then get told to contact support for a refund": it's claimed the
+    instant checkout starts, not just soft-checked and hoped-for, so a losing concurrent
+    request is rejected here, before it ever reaches Cashfree, instead of after paying.
     """
     from .db_connection import db_main
     if not ObjectId.is_valid(str(cafe_id)):
@@ -267,7 +269,17 @@ def create_cafe_booking_order_handler(cafe_id, amount_in_inr, zone=None, date=No
         return {"status": "error", "message": "Cafe not found."}
 
     hold_token = None
-    if date and slots:
+    if rig_ids and date and start_time is not None and duration_minutes is not None:
+        import uuid as _uuid
+        from .bookings_handler import hold_rigs_for_payment, validate_booking_window
+        start_minutes, duration_minutes, window_error = validate_booking_window(start_time, duration_minutes)
+        if window_error:
+            return {"status": "error", "message": window_error}
+        hold_token = _uuid.uuid4().hex
+        ok, message = hold_rigs_for_payment(str(cafe_id), str(date), rig_ids, start_minutes, duration_minutes, hold_token, user_email=user_email)
+        if not ok:
+            return {"status": "error", "message": message}
+    elif date and slots:
         import uuid as _uuid
         from .bookings_handler import hold_slots_for_payment
         hold_token = _uuid.uuid4().hex
@@ -294,12 +306,19 @@ def create_cafe_booking_order_handler(cafe_id, amount_in_inr, zone=None, date=No
             "hold_date": date,
             "hold_slots": slots,
             "hold_rig": rig,
+            "hold_rig_ids": rig_ids,
+            "hold_start_time": start_time,
+            "hold_duration_minutes": duration_minutes,
         })
     elif hold_token:
         # Order creation failed or fell back to a mock (missing Cashfree creds) — release
         # the hold immediately rather than leaving it to sit out its full TTL for nothing.
-        from .bookings_handler import release_slot_hold
-        release_slot_hold(str(cafe_id), str(date), rig, slots or [], hold_token)
+        if rig_ids:
+            from .bookings_handler import release_rig_hold
+            release_rig_hold(str(cafe_id), str(date), rig_ids, start_minutes, duration_minutes, hold_token)
+        else:
+            from .bookings_handler import release_slot_hold
+            release_slot_hold(str(cafe_id), str(date), rig, slots or [], hold_token)
 
     order["used_platform_fallback"] = used_platform_fallback
     return order
@@ -307,21 +326,33 @@ def create_cafe_booking_order_handler(cafe_id, amount_in_inr, zone=None, date=No
 
 def release_cafe_booking_hold(cafe_id, order_id):
     """
-    Explicitly releases a pre-payment slot hold when the customer cancels or fails
-    checkout, so the slot frees up immediately instead of waiting out the TTL (see
-    hold_slots_for_payment). Best-effort UX nicety only — the TTL index on
-    slot_locks.expires_at is what actually guarantees an abandoned hold (app killed,
-    network drop, anything that never calls this) can't lock a slot forever.
+    Explicitly releases a pre-payment hold when the customer cancels or fails checkout,
+    so the station(s) free up immediately instead of waiting out the TTL (see
+    hold_slots_for_payment/hold_rigs_for_payment). Best-effort UX nicety only — the TTL
+    index on slot_locks.expires_at is what actually guarantees an abandoned hold (app
+    killed, network drop, anything that never calls this) can't lock a station forever.
     """
     from .db_connection import db_main
-    from .bookings_handler import release_slot_hold
     order_record = db_main.cafe_payment_orders.find_one({"order_id": order_id, "cafe_id": str(cafe_id)})
     if not order_record or not order_record.get("hold_token"):
         return
-    release_slot_hold(
-        str(cafe_id),
-        order_record.get("hold_date"),
-        order_record.get("hold_rig"),
-        order_record.get("hold_slots") or [],
-        order_record.get("hold_token"),
-    )
+    if order_record.get("hold_rig_ids"):
+        from .bookings_handler import release_rig_hold, validate_booking_window
+        start_minutes, duration_minutes, window_error = validate_booking_window(
+            order_record.get("hold_start_time"), order_record.get("hold_duration_minutes")
+        )
+        if window_error:
+            return
+        release_rig_hold(
+            str(cafe_id), order_record.get("hold_date"), order_record.get("hold_rig_ids"),
+            start_minutes, duration_minutes, order_record.get("hold_token"),
+        )
+    else:
+        from .bookings_handler import release_slot_hold
+        release_slot_hold(
+            str(cafe_id),
+            order_record.get("hold_date"),
+            order_record.get("hold_rig"),
+            order_record.get("hold_slots") or [],
+            order_record.get("hold_token"),
+        )

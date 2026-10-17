@@ -80,6 +80,15 @@ def map_tournament_doc(doc, cafe_name=None, cafe_address=None, cafe_phone=None):
         "isLive": is_live,
         "registrationOpen": effective_registration_open,
         "images": doc.get("images", []),
+        # Defaults True for any tournament created before this field existed — the home
+        # screen's "Upcoming Tournaments" section only shows featured=true ones, and
+        # hiding every pre-existing tournament the instant this shipped would have been
+        # a surprise regression, not a deliberate curation choice by a super admin.
+        "featured": doc.get("featured", True),
+        # When this tournament was actually marked completed (see update_tournament_handler)
+        # — distinct from starts_iso, which is when it was scheduled to START, not when it
+        # finished. None until a super admin sets status="completed".
+        "completedAt": doc.get("completed_at").isoformat() if isinstance(doc.get("completed_at"), datetime) else None,
         "cafe_id": doc.get("cafe_id"),
         # None for platform-wide tournaments (no cafe_id) - the frontend shows a
         # "BookMyConsole" / platform badge in that case instead of a cafe name.
@@ -124,18 +133,25 @@ def _resolve_cafe_names_batch(db_main, cafe_ids):
     return {str(c["_id"]): {"name": c.get("name"), "address": c.get("address"), "phone": c.get("phone")} for c in cafes}
 
 
-def get_tournaments_handler(cafe_id=None):
-    """Retrieves all esports tournaments from the database."""
+def get_tournaments_handler(cafe_id=None, featured_only=False):
+    """Retrieves all esports tournaments from the database. featured_only=True scopes
+    this to the home screen's curated set (see Handlers/tournaments.py's featured field
+    — defaults True so nothing already in the database silently vanished when this
+    shipped; a super admin opts a specific tournament OUT, not every one in)."""
     db_main = get_db()
     if db_main is None:
         return {"status": "error", "message": "MongoDB connection is not established."}
 
     try:
-        # Migrate any user-created tournaments missing registration_open — the one
+        # Migrate any user-created tournaments missing registration_open/featured — the
         # ongoing backfill that's actually still relevant (real tournaments, not seeds).
         db_main.tournaments.update_many(
             {"registration_open": {"$exists": False}},
             {"$set": {"registration_open": True}}
+        )
+        db_main.tournaments.update_many(
+            {"featured": {"$exists": False}},
+            {"$set": {"featured": True}}
         )
 
         query = {}
@@ -145,6 +161,8 @@ def get_tournaments_handler(cafe_id=None):
                 {"cafe_id": None},
                 {"cafe_id": {"$exists": False}}
             ]
+        if featured_only:
+            query["featured"] = True
 
         docs = list(db_main.tournaments.find(query))
         cafe_info_by_id = _resolve_cafe_names_batch(db_main, [d.get("cafe_id") for d in docs])
@@ -283,6 +301,11 @@ def create_tournament_handler(data, files=None):
             "starts_iso": starts_iso,
             "registration_open": True,
             "images": final_images,
+            # Defaults to True (shows on the home screen's featured section) so a
+            # newly-created tournament is visible without the super admin having to
+            # remember to flip a switch — they explicitly hide one later if they don't
+            # want it featured, rather than opting every new tournament in by hand.
+            "featured": input_validation.parse_bool(data.get("featured"), default=True),
             "cafe_id": data.get("cafe_id") or data.get("cafeId"),
             "status": "upcoming"
         }
@@ -492,6 +515,11 @@ def update_tournament_handler(tournament_id, data, files=None):
             update_doc["status"] = status
             if status == "cancelled":
                 update_doc["registration_open"] = False
+            # Stamp once, on the transition into "completed" — never overwritten on later
+            # edits, so it stays the actual completion time rather than drifting to
+            # whenever an admin happens to touch the tournament again.
+            if status == "completed" and not existing.get("completed_at"):
+                update_doc["completed_at"] = datetime.now(timezone.utc)
 
         if capacity is not None:
             capacity, err = input_validation.parse_bounded_number(capacity, "Capacity", min_val=1, max_val=100000)
@@ -512,6 +540,8 @@ def update_tournament_handler(tournament_id, data, files=None):
         if mode is not None: update_doc["mode"] = mode
         if starts is not None: update_doc["starts"] = starts
         if starts_iso is not None: update_doc["starts_iso"] = starts_iso
+        if data.get("featured") is not None:
+            update_doc["featured"] = input_validation.parse_bool(data.get("featured"))
 
         # Handle Cloudinary upload if a new file is sent
         image_url = None

@@ -50,6 +50,11 @@ def map_rig_doc(doc, cafe_prices=None):
         "status": doc.get("status", "available"),
         "zone": doc.get("zone", "Standard"),
         "hourly_price": doc.get("hourly_price") if doc.get("hourly_price") is not None else (cafe_price if cafe_price is not None else 150),
+        # Free-text games the admin says are installed on this rig (e.g. "GTA 5", "BGMI")
+        # — matched case-insensitively against the customer's selected game in the
+        # booking flow (bookings_handler.create_booking_handler). No games catalog exists
+        # anywhere in this codebase by design; this is deliberately just per-rig tags.
+        "installed_games": doc.get("installed_games") or [],
     }
 
 def get_rigs_handler(cafe_id=None):
@@ -254,6 +259,13 @@ def create_rig_handler(data):
             return {"status": "error", "message": price_error}
         cafe_id = data.get("cafeId") or data.get("cafe_id")
 
+        installed_games, games_error = input_validation.parse_string_list(
+            data.get("installed_games") or data.get("installedGames"),
+            "Installed games", max_items=20, max_item_len=40,
+        )
+        if games_error:
+            return {"status": "error", "message": games_error}
+
         rig_doc = {
             "cafe_id": cafe_id,
             "type": rig_type,
@@ -263,7 +275,8 @@ def create_rig_handler(data):
             "specs": spec,
             "status": status,
             "zone": zone,
-            "hourly_price": hourly_price
+            "hourly_price": hourly_price,
+            "installed_games": installed_games,
         }
 
         result = db_main.rigs.insert_one(rig_doc)
@@ -346,6 +359,14 @@ def update_rig_handler(rig_id, data):
             if price_error:
                 return {"status": "error", "message": price_error}
             update_fields["hourly_price"] = price
+        if "installed_games" in data or "installedGames" in data:
+            installed_games, games_error = input_validation.parse_string_list(
+                data.get("installed_games") if "installed_games" in data else data.get("installedGames"),
+                "Installed games", max_items=20, max_item_len=40,
+            )
+            if games_error:
+                return {"status": "error", "message": games_error}
+            update_fields["installed_games"] = installed_games
         # SECURITY: cafe_id is deliberately NOT updatable here. The caller is authorized
         # against the rig's CURRENT cafe_id only (RigDetailView._authenticate_for_rig
         # checks ownership of the rig as it exists now, before this update runs) — if this

@@ -342,8 +342,15 @@ def map_cafe_doc(doc, user_lat=None, user_lon=None, public=False):
     }
 
 
-def get_cafes_handler(latitude=None, longitude=None, include_deleted=False):
-    """Retrieves all gaming cafes from the database. Seeds the DB if empty."""
+def get_cafes_handler(latitude=None, longitude=None, include_deleted=False, game=None):
+    """Retrieves all gaming cafes from the database. Seeds the DB if empty.
+
+    game: when set, scopes the result to cafes with at least one rig whose
+    installed_games contains this exact name (case-insensitive) — the home screen's
+    "tap a recommended game -> cafes that have it, sorted by distance" feature. Filters
+    BEFORE the existing haversine sort runs below, so that sort/ordering logic is
+    completely untouched by this — it just operates on a smaller cafe set.
+    """
     db_main = get_db()
     if db_main is None:
         return {
@@ -389,6 +396,20 @@ def get_cafes_handler(latitude=None, longitude=None, include_deleted=False):
             # A super admin's manual "Suspend Hub" (status field) is a separate reason to
             # hide a cafe from the public listing, independent of billing.
             query["status"] = {"$ne": "suspended"}
+
+        if game:
+            import re as _re
+            # Exact match (anchored), case-insensitive — mirrors the same
+            # strip().lower() == comparison create_group_booking_handler uses when
+            # validating a rig's installed_games against a selected game, not a
+            # substring search (a cafe with "Valorant 2" installed shouldn't match "Valorant").
+            matching_cafe_ids = db_main.rigs.distinct(
+                "cafe_id",
+                {"installed_games": {"$regex": f"^{_re.escape(game.strip())}$", "$options": "i"}},
+            )
+            valid_object_ids = [ObjectId(cid) for cid in matching_cafe_ids if ObjectId.is_valid(cid)]
+            query["_id"] = {"$in": valid_object_ids}
+
         docs = list(db_main.cafes.find(query))
         # include_deleted is already super-admin-gated at the view layer, so that path may
         # see full owner detail; the plain public listing must not.

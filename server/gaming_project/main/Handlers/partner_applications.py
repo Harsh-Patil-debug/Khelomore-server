@@ -148,7 +148,10 @@ def create_partner_application_handler(data, files=None):
                 if err:
                     return {"status": "error", "message": err}, 400
 
-        optional_text_limits = {"otherDevices": 200, "openingHours": 80, "instagram": 80, "message": 800, "specs": 200}
+        # specs now also carries the applicant's selected Facilities chips merged in
+        # (see gaming-cafe-connect's PartnerForm), on top of their free-text hardware
+        # specs — 200 was tight enough to risk truncating that combination.
+        optional_text_limits = {"otherDevices": 200, "openingHours": 80, "instagram": 80, "message": 800, "specs": 400}
         for field, max_len in optional_text_limits.items():
             value = data.get(field)
             if value:

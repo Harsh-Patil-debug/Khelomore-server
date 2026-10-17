@@ -67,15 +67,20 @@ def parse_slot_times(date_str: str, slots: list) -> tuple:
         default_end = datetime.strptime(f"{date_str} 10:00 PM", "%Y-%m-%d %I:%M %p").replace(tzinfo=IST) + timedelta(hours=2)
         return default_start, default_end
     return min(start_times), max(end_times)
-def calculate_booking_status_and_time(date_str: str, slots: list, db_status: str = "Upcoming", actual_end_at=None) -> tuple:
+def calculate_status_from_window(date_str: str, _earliest_start, latest_end, db_status: str = "Upcoming", actual_end_at=None) -> tuple:
     """
+    The actual status/remaining-time logic, factored out of calculate_booking_status_and_time
+    so both the old slots-list bookings AND the new (rig_ids/start_time/duration_minutes)
+    group bookings share one implementation instead of two copies that could drift.
+    earliest_start/latest_end are already-parsed tz-aware datetimes for the booking's window.
+
     SECURITY/UX: completion is admin-only, via end_session_handler — this must never
-    derive "Completed" purely from the slot's scheduled end time having passed for a
+    derive "Completed" purely from the window's scheduled end time having passed for a
     same-day booking. It used to, which raced against Live Floor (which shows the real
     db_status) — a booking would flip to "Completed" here the instant the clock passed
-    its slot end even though the admin never actually ended it, while Live Floor kept
-    showing it Reserved/Active until it was manually ended. A booking from an earlier
-    calendar day is unambiguous either way, so that one case still auto-resolves.
+    its end even though the admin never actually ended it, while Live Floor kept showing
+    it Reserved/Active until it was manually ended. A booking from an earlier calendar day
+    is unambiguous either way, so that one case still auto-resolves.
     """
     # 0. If the database already has a final status (Completed/Cancelled), respect it!
     if db_status in ["Completed", "Cancelled", "completed", "cancelled"]:
@@ -88,26 +93,294 @@ def calculate_booking_status_and_time(date_str: str, slots: list, db_status: str
     if date_str < today_str:
         return "Completed", 0
 
-    # 2. Parse slot times to find latest end time
+    # 2. If booking has been started manually by admin (status is "Active")
+    if db_status == "Active":
+        # Use actual_end_at from DB if set (synced timer), else fall back to the window's
+        # scheduled end. Elapsed time only clamps the displayed remaining time to 0 — it
+        # never flips the status away from Active on its own.
+        end_time = actual_end_at if actual_end_at else latest_end
+        remaining_seconds = int((end_time - now).total_seconds())
+        return "Active", max(0, remaining_seconds)
+
+    # 3. Otherwise it stays Upcoming/Reserved — whether the window hasn't started yet, is
+    # happening now, or is overdue and awaiting the admin's manual action.
+    return "Upcoming", 0
+
+
+def calculate_booking_status_and_time(date_str: str, slots: list, db_status: str = "Upcoming", actual_end_at=None) -> tuple:
+    """Slots-list (old-shape booking) variant — parses the window then delegates to
+    calculate_status_from_window, which holds the actual logic."""
     try:
         earliest_start, latest_end = parse_slot_times(date_str, slots)
-
-        # 3. If booking has been started manually by admin (status is "Active")
-        if db_status == "Active":
-            # Use actual_end_at from DB if set (synced timer), else fall back to slot end.
-            # Elapsed time only clamps the displayed remaining time to 0 — it never flips
-            # the status away from Active on its own.
-            end_time = actual_end_at if actual_end_at else latest_end
-            remaining_seconds = int((end_time - now).total_seconds())
-            return "Active", max(0, remaining_seconds)
-
-        # 4. Otherwise it stays Upcoming/Reserved — whether the slot hasn't started yet,
-        # is happening now, or is overdue and awaiting the admin's manual action.
-        return "Upcoming", 0
-
+        return calculate_status_from_window(date_str, earliest_start, latest_end, db_status, actual_end_at)
     except Exception as e:
         print(f"Error parsing slot times: {str(e)}")
         return db_status, 0
+
+
+# ── Flexible-duration, multi-rig group bookings ─────────────────────────────────────────
+# New booking model alongside the fixed-hourly-slot one above (left untouched — still used
+# by the legacy admin manual-booking path, Handlers/bookings.py, and reserve_rig_slots_handler
+# — deliberately out of scope, see the feature plan). A new booking has rig_ids/game/
+# num_players/start_time/duration_minutes instead of rig/slots; old bookings are never
+# migrated, only read back through back-compat synthesis in get_user_bookings_handler.
+
+MIN_BOOKING_DURATION_MINUTES = 60
+MAX_BOOKING_DURATION_MINUTES = 720  # 12 hours — a sane upper bound, not a business rule
+DURATION_INCREMENT_MINUTES = 15
+START_TIME_INCREMENT_MINUTES = 5
+MICRO_SLOT_MINUTES = 5
+
+
+def _time_str_to_minutes(hhmm: str) -> "int | None":
+    """Parses a 24h 'HH:MM' string into minutes since midnight. Returns None (not a raised
+    exception) on anything malformed, so callers can produce one clean validation error
+    instead of an unhandled crash on client-supplied input."""
+    try:
+        h, m = str(hhmm).strip().split(":")
+        h, m = int(h), int(m)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h * 60 + m
+    except Exception:
+        pass
+    return None
+
+
+def _minutes_to_time_str(minutes: int) -> str:
+    minutes = minutes % (24 * 60)
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _minutes_to_display(minutes: int) -> str:
+    """24h minutes -> '4:05 PM' style display string, matching this file's existing
+    slot-string convention (parse_slot_times/DEFAULT_SLOTS use the same '%I:%M %p' shape)."""
+    minutes = minutes % (24 * 60)
+    dt = datetime(2000, 1, 1) + timedelta(minutes=minutes)
+    return dt.strftime("%I:%M %p").lstrip("0")
+
+
+def _micro_slot_keys(start_minutes: int, duration_minutes: int) -> list:
+    """The 5-minute-tick keys a [start, start+duration) window claims — e.g. a 75-minute
+    booking from 16:00 -> ['16:00','16:05',...,'17:10'] (15 keys). Generalizes the old
+    exact-slot-string unique-index trick to arbitrary windows: MongoDB's uniqueness
+    constraint doesn't care what the string means, only that two bookings can never both
+    claim the same one. Well-formed by construction since start/duration are always
+    validated as multiples of 5/15 minutes before this is ever called."""
+    return [_minutes_to_time_str(m) for m in range(start_minutes, start_minutes + duration_minutes, MICRO_SLOT_MINUTES)]
+
+
+def validate_booking_window(start_time: str, duration_minutes) -> "tuple[int | None, int | None, str | None]":
+    """Validates a candidate (start_time, duration_minutes) pair. Returns
+    (start_minutes, duration_minutes, error) — error is None on success."""
+    start_minutes = _time_str_to_minutes(start_time)
+    if start_minutes is None:
+        return None, None, "Invalid start time."
+    if start_minutes % START_TIME_INCREMENT_MINUTES != 0:
+        return None, None, f"Start time must be on a {START_TIME_INCREMENT_MINUTES}-minute increment."
+    try:
+        duration_minutes = int(duration_minutes)
+    except (TypeError, ValueError):
+        return None, None, "Invalid duration."
+    if duration_minutes < MIN_BOOKING_DURATION_MINUTES:
+        return None, None, f"Minimum booking duration is {MIN_BOOKING_DURATION_MINUTES} minutes."
+    if duration_minutes > MAX_BOOKING_DURATION_MINUTES:
+        return None, None, f"Maximum booking duration is {MAX_BOOKING_DURATION_MINUTES} minutes."
+    if duration_minutes % DURATION_INCREMENT_MINUTES != 0:
+        return None, None, f"Duration must be in {DURATION_INCREMENT_MINUTES}-minute increments."
+    if start_minutes + duration_minutes > 24 * 60:
+        return None, None, "Booking cannot extend past midnight."
+    return start_minutes, duration_minutes, None
+
+
+def parse_window(date_str: str, start_minutes: int, duration_minutes: int) -> tuple:
+    """Returns (start_dt, end_dt) tz-aware datetimes for a validated window — the
+    new-shape equivalent of parse_slot_times."""
+    start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
+        hour=start_minutes // 60, minute=start_minutes % 60, tzinfo=IST
+    )
+    end_dt = start_dt + timedelta(minutes=duration_minutes)
+    return start_dt, end_dt
+
+
+def check_multi_rig_window_conflict(cafe_id: str, date: str, rig_ids: list, start_minutes: int, duration_minutes: int, rig_names_by_id: dict) -> "str | None":
+    """
+    Real interval-overlap conflict check (unlike check_slot_conflict's exact-string
+    membership above) — the actual bug class this new model exists to fix: two bookings
+    with DIFFERENT but overlapping time strings on the same rig must conflict. Checks
+    candidate rigs against BOTH booking shapes that might already occupy them: new-shape
+    (rig_ids + start_time/duration_minutes) and old-shape (rig name + slots), since a rig
+    can have bookings of either kind depending on when it was booked.
+    """
+    candidate_start = start_minutes
+    candidate_end = start_minutes + duration_minutes
+    existing = db_main.bookings.find({"cafe_id": cafe_id, "date": date, "status": {"$in": ["Upcoming", "Active"]}})
+    for b in existing:
+        b_rig_ids = b.get("rig_ids")
+        if b_rig_ids:
+            overlap_ids = set(b_rig_ids) & set(rig_ids)
+            if not overlap_ids:
+                continue
+            # A rig within this group booking can already be individually Cancelled (a
+            # no-show) or Completed (ended early) while the booking's own aggregate
+            # status is still Upcoming/Active because of its other rigs — see the
+            # identical check in get_rig_availability_handler. Without this, a cancelled
+            # rig still blocks rebooking here even though the availability screen (which
+            # already excludes it) just told the customer that exact slot was free.
+            rig_sessions = b.get("rig_sessions") or {}
+            overlap_ids = {
+                rid for rid in overlap_ids
+                if rig_sessions.get(rid, {}).get("status", "Upcoming") not in ("Completed", "Cancelled")
+            }
+            if not overlap_ids:
+                continue
+            b_start = _time_str_to_minutes(b.get("start_time"))
+            b_duration = b.get("duration_minutes")
+            if b_start is None or b_duration is None:
+                continue
+            b_end = b_start + b_duration
+            if candidate_start < b_end and b_start < candidate_end:
+                names = ", ".join(rig_names_by_id.get(rid, rid) for rid in overlap_ids)
+                return f"Conflict detected: {names} already booked for an overlapping time."
+        else:
+            b_rig_name = _normalize_rig_name(b.get("rig", ""))
+            matching_ids = [rid for rid, name in rig_names_by_id.items() if _normalize_rig_name(name) == b_rig_name and rid in rig_ids]
+            if not matching_ids:
+                continue
+            try:
+                b_start_dt, b_end_dt = parse_slot_times(b.get("date"), b.get("slots", []))
+                cand_start_dt, cand_end_dt = parse_window(date, candidate_start, duration_minutes)
+                if cand_start_dt < b_end_dt and b_start_dt < cand_end_dt:
+                    return f"Conflict detected: {b_rig_name} already booked for an overlapping time."
+            except Exception:
+                continue
+    return None
+
+
+def get_rig_availability_handler(cafe_id: str, date: str):
+    """
+    Returns every rig's busy intervals (in minutes-since-midnight) for a given cafe+date,
+    across BOTH booking shapes — the raw data the mobile time/seat picker needs to (a)
+    grey out an "Ineligible"/fully-booked rig for a candidate window, and (b) compute the
+    "nearest time any eligible rig frees up" smart-default when every eligible rig is
+    currently busy for the customer's first-choice time (rather than just presenting a
+    picker with no guidance once every 5-minute tick near "now" is unbookable).
+    Returns {status, busy: {rig_id: [{"start": int, "end": int}, ...]}}.
+    """
+    try:
+        rig_docs = list(db_main.rigs.find({"cafe_id": cafe_id}, {"name": 1}))
+        rig_ids_at_cafe = {str(r["_id"]) for r in rig_docs}
+        name_to_ids = {}
+        for r in rig_docs:
+            name_to_ids.setdefault(_normalize_rig_name(r.get("name", "")), []).append(str(r["_id"]))
+
+        busy = {rid: [] for rid in rig_ids_at_cafe}
+        bookings = db_main.bookings.find({"cafe_id": cafe_id, "date": date, "status": {"$in": ["Upcoming", "Active"]}})
+        for b in bookings:
+            b_rig_ids = b.get("rig_ids")
+            if b_rig_ids:
+                start = _time_str_to_minutes(b.get("start_time"))
+                duration = b.get("duration_minutes")
+                if start is None or duration is None:
+                    continue
+                rig_sessions = b.get("rig_sessions") or {}
+                for rid in b_rig_ids:
+                    if rid not in busy:
+                        continue
+                    # The booking's own aggregate status (checked by the query above)
+                    # only reflects the GROUP as a whole — a single rig within it can
+                    # already be individually Completed (ended early) or Cancelled (a
+                    # no-show) while siblings are still Upcoming/Active. Either way that
+                    # specific rig is free again and must not block a new booking from
+                    # seeing it as available.
+                    rig_status = rig_sessions.get(rid, {}).get("status", "Upcoming")
+                    if rig_status in ("Completed", "Cancelled"):
+                        continue
+                    busy[rid].append({"start": start, "end": start + duration})
+            else:
+                try:
+                    start_dt, end_dt = parse_slot_times(b.get("date"), b.get("slots", []))
+                    start = start_dt.hour * 60 + start_dt.minute
+                    end = start + int((end_dt - start_dt).total_seconds() // 60)
+                except Exception:
+                    continue
+                for rid in name_to_ids.get(_normalize_rig_name(b.get("rig", "")), []):
+                    busy[rid].append({"start": start, "end": end})
+
+        return {"status": "success", "busy": busy}, 200
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to retrieve rig availability: {str(e)}"}, 500
+
+
+def hold_rigs_for_payment(cafe_id: str, date: str, rig_ids: list, start_minutes: int, duration_minutes: int, hold_token: str, user_email: "str | None" = None, hold_minutes: int = 5):
+    """Multi-rig generalization of hold_slots_for_payment — same atomicity mechanism
+    (unique-indexed lock docs, one insert_many per claim, TTL-based auto-release on an
+    abandoned checkout), just claiming every (rig_id, micro_slot) pair across all
+    requested rigs in one transaction instead of one rig's exact slot strings. Uses the
+    SAME slot_locks collection/index as the old model — rig_ids are 24-hex ObjectId
+    strings and micro-slot keys are 'HH:MM' ticks, both disjoint from the old model's rig
+    NAME strings and hour-range slot strings, so the two schemes can never collide."""
+    _ensure_slot_locks_index()
+    micro_keys = _micro_slot_keys(start_minutes, duration_minutes)
+
+    if user_email:
+        db_main.slot_locks.delete_many({
+            "user_email": user_email,
+            "expires_at": {"$exists": True},
+            "owner_token": {"$ne": hold_token},
+        })
+
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=hold_minutes)
+    lock_docs = [
+        {"cafe_id": cafe_id, "rig": rig_id, "date": date, "slot": key,
+         "expires_at": expires_at, "owner_token": hold_token, "user_email": user_email}
+        for rig_id in rig_ids for key in micro_keys
+    ]
+
+    client = get_client()
+    if client is None:
+        return False, "Database connection unavailable."
+
+    def _try_claim():
+        with client.start_session() as session:
+            with session.start_transaction():
+                db_main.slot_locks.insert_many(lock_docs, ordered=True, session=session)
+
+    try:
+        _try_claim()
+        return True, None
+    except (DuplicateKeyError, BulkWriteError, OperationFailure) as e:
+        is_conflict = getattr(e, "code", None) == 11000 or "E11000" in str(e)
+        if not is_conflict:
+            return False, f"Failed to hold slots: {e}"
+        now = datetime.now(timezone.utc)
+        removed = db_main.slot_locks.delete_many({
+            "cafe_id": cafe_id, "rig": {"$in": rig_ids}, "date": date,
+            "slot": {"$in": micro_keys}, "expires_at": {"$lte": now},
+        })
+        if removed.deleted_count > 0:
+            try:
+                _try_claim()
+                return True, None
+            except (DuplicateKeyError, BulkWriteError, OperationFailure):
+                pass
+        return False, ("One or more selected stations are already booked or currently being "
+                        "paid for by someone else. Please pick a different time or station.")
+    except Exception as e:
+        return False, f"Failed to hold slots: {e}"
+
+
+def release_rig_hold(cafe_id: str, date: str, rig_ids: list, start_minutes: int, duration_minutes: int, hold_token: "str | None"):
+    """Multi-rig generalization of release_slot_hold."""
+    if not rig_ids or not hold_token:
+        return
+    micro_keys = _micro_slot_keys(start_minutes, duration_minutes)
+    try:
+        db_main.slot_locks.delete_many({
+            "cafe_id": cafe_id, "rig": {"$in": rig_ids}, "date": date,
+            "slot": {"$in": micro_keys}, "owner_token": hold_token,
+        })
+    except Exception:
+        pass
 
 def _normalize_rig_name(rig: str) -> str:
     """Same normalization check_slot_conflict uses to match a booking's stored `rig`
@@ -329,6 +602,283 @@ def _resolve_hourly_price(cafe_id, rig_name=None):
         if cafe and cafe.get("price_per_hour") is not None:
             return cafe.get("price_per_hour")
     return 150
+
+
+def create_group_booking_handler(user_email: str, cafe_id: str, cafe_name: str, rig_ids: list, game: str, num_players, date: str, start_time: str, duration_minutes, user_name: "str | None" = None, user_phone: str = "", cashfree_order_id: "str | None" = None, coupon_code: "str | None" = None, offer_id: "str | None" = None, use_wallet: bool = False):
+    """
+    The flexible-duration, multi-rig booking path — one or more rigs, all sharing the
+    selected game, one continuous [start_time, start_time+duration_minutes) window,
+    booked together as ONE atomic group. Mirrors create_booking_handler's proven
+    structure (server-side pricing, wallet/Cashfree split, transaction-wrapped atomic
+    claim, identical error-handling shape) but for this new booking shape — see the
+    feature plan for why this is a separate function rather than a generalization of the
+    old one (the old one's contiguous-slot-group splitting has no equivalent here; there
+    is always exactly one continuous window).
+    """
+    try:
+        cafe_id = str(cafe_id) if cafe_id is not None else cafe_id
+        date = str(date) if date is not None else date
+
+        if not user_name:
+            user_doc = db_main.users.find_one({"email": user_email})
+            if user_doc:
+                user_name = user_doc.get("full_name") or user_doc.get("name")
+            if not user_name:
+                user_name = user_email.split("@")[0].upper()
+        if user_email == "harshdpatil2007@gmail.com" and (not user_name or user_name.upper() == "HARSHDPATIL2007"):
+            user_name = "Harsh Patil"
+
+        if not rig_ids or not isinstance(rig_ids, list):
+            return {"status": "error", "message": "At least one station must be selected."}, 400
+        rig_ids = [str(r) for r in rig_ids]
+        if len(set(rig_ids)) != len(rig_ids):
+            return {"status": "error", "message": "Duplicate stations selected."}, 400
+        if not all(ObjectId.is_valid(r) for r in rig_ids):
+            return {"status": "error", "message": "Invalid station id."}, 400
+
+        game = (game or "").strip()
+        if not game:
+            return {"status": "error", "message": "A game must be selected."}, 400
+
+        try:
+            num_players = int(num_players)
+        except (TypeError, ValueError):
+            return {"status": "error", "message": "Invalid number of players."}, 400
+        # SECURITY/INTEGRITY: num_players is customer-facing framing, not an independent
+        # grant — the one thing enforced here is that it matches the actual rig count
+        # being claimed, so a client can't under/over-report intent independent of what's
+        # really booked (e.g. claiming 1 player while actually locking 4 rigs).
+        if num_players != len(rig_ids):
+            return {"status": "error", "message": "Number of players must match the number of stations selected."}, 400
+
+        start_minutes, duration_minutes, window_error = validate_booking_window(start_time, duration_minutes)
+        if window_error:
+            return {"status": "error", "message": window_error}, 400
+
+        # 1. Resolve + validate every rig server-side: belongs to this cafe, not under
+        # maintenance, and has the selected game installed — never trusting the client's
+        # own filtering of which rigs it displayed as eligible.
+        rig_docs = list(db_main.rigs.find({"_id": {"$in": [ObjectId(r) for r in rig_ids]}}))
+        if len(rig_docs) != len(rig_ids):
+            return {"status": "error", "message": "One or more selected stations don't exist."}, 400
+        rig_names_by_id = {}
+        rig_zones = set()
+        for rd in rig_docs:
+            rid = str(rd["_id"])
+            if str(rd.get("cafe_id")) != cafe_id:
+                return {"status": "error", "message": "One or more selected stations don't belong to this cafe."}, 400
+            if rd.get("status") == "maintenance":
+                return {"status": "error", "message": f"Station '{rd.get('name')}' is currently under maintenance."}, 400
+            installed = [g.strip().lower() for g in (rd.get("installed_games") or [])]
+            if game.lower() not in installed:
+                return {"status": "error", "message": f"Station '{rd.get('name')}' doesn't have '{game}' installed."}, 400
+            rig_names_by_id[rid] = rd.get("name")
+            rig_zones.add(rd.get("zone", "Standard"))
+        zone = next(iter(rig_zones)) if len(rig_zones) == 1 else ", ".join(sorted(rig_zones))
+
+        # 2. Real interval-overlap conflict check — the actual bug class this model
+        # exists to fix, vs. check_slot_conflict's exact-string membership above.
+        conflict_message = check_multi_rig_window_conflict(cafe_id, date, rig_ids, start_minutes, duration_minutes, rig_names_by_id)
+        if conflict_message:
+            return {"status": "error", "message": conflict_message}, 400
+
+        # 2b. Compute the authoritative price server-side and verify payment before booking.
+        order_record = db_main.cafe_payment_orders.find_one({"order_id": cashfree_order_id, "cafe_id": cafe_id}) if cashfree_order_id else None
+        hold_token = order_record.get("hold_token") if order_record else None
+        if order_record and order_record.get("purpose") == "wallet_topup":
+            return {"status": "error", "message": "This payment can't be used for a booking."}, 402
+
+        total_hourly = sum((rd.get("hourly_price") if rd.get("hourly_price") is not None else 150) for rd in rig_docs)
+        duration_hours = duration_minutes / 60.0
+        from .offers import compute_best_price
+        total_price, applied_offer_id, price_error = compute_best_price(
+            cafe_id, total_hourly, duration_hours, coupon_code=coupon_code, offer_id=offer_id
+        )
+        if price_error:
+            if hold_token:
+                release_rig_hold(cafe_id, date, rig_ids, start_minutes, duration_minutes, hold_token)
+            return {"status": "error", "message": price_error}, 400
+
+        # Wallet split — identical pattern to create_booking_handler: sized from the
+        # ACTUAL current balance, use_wallet is only a flag, the atomic debit itself
+        # happens later inside the final transaction.
+        wallet_portion = 0
+        if use_wallet and total_price > 0:
+            wallet_doc = db_main.wallet_balances.find_one({"user_email": user_email, "cafe_id": cafe_id})
+            available_balance = int(wallet_doc["balance"]) if wallet_doc else 0
+            wallet_portion = min(available_balance, total_price)
+        cashfree_portion = total_price - wallet_portion
+
+        payment_settlement = None
+        if cashfree_portion > 0:
+            from .payments import verify_cashfree_payment
+            if not verify_cashfree_payment(cashfree_order_id, cashfree_portion * 100, cafe_id=cafe_id):
+                if hold_token:
+                    release_rig_hold(cafe_id, date, rig_ids, start_minutes, duration_minutes, hold_token)
+                return {
+                    "status": "error",
+                    "message": "Payment verification failed. Please complete payment before booking."
+                }, 402
+            payment_status = "paid"
+            payment_settlement = "platform_pending_payout" if (order_record and order_record.get("used_platform_fallback")) else "direct_to_cafe"
+        else:
+            payment_status = "paid"  # free slot, or fully covered by wallet
+
+        end_minutes = start_minutes + duration_minutes
+        code = str(random.randint(100000, 999999))
+        start_dt, end_dt = parse_window(date, start_minutes, duration_minutes)
+        status, remaining_time = calculate_status_from_window(date, start_dt, end_dt, "Upcoming")
+
+        booking_doc = {
+            "user_email": user_email,
+            "user_name": user_name,
+            "user_phone": user_phone,
+            "cafe_id": cafe_id,
+            "cafe_name": cafe_name,
+            "zone": zone,
+            "date": date,
+            "rig_ids": rig_ids,
+            "game": game,
+            "num_players": num_players,
+            "start_time": _minutes_to_time_str(start_minutes),
+            "duration_minutes": duration_minutes,
+            "end_time": _minutes_to_time_str(end_minutes),
+            "price": total_price,
+            "wallet_portion_used": wallet_portion,
+            "code": code,
+            "status": status,
+            "payment_status": payment_status,
+            "payment_settlement": payment_settlement,
+            # Per-rig live-session state — Live Floor starts/ends/extends each rig in a
+            # group booking independently (one friend can leave early), so status/timing
+            # is tracked per rig_id rather than one flat value for the whole booking.
+            "rig_sessions": {rid: {"status": "Upcoming"} for rid in rig_ids},
+            "createdAt": datetime.now(IST),
+        }
+
+        # 3. Atomically claim every (rig_id, micro_slot) key, debit the wallet, and insert
+        # the booking — all in one transaction, same all-or-nothing guarantee as the old
+        # model. If order creation already held this exact window (hold_rigs_for_payment),
+        # confirm that hold in one batched update_many instead of a fresh claim; a hold
+        # covers its FULL requested key set atomically by construction (see
+        # hold_rigs_for_payment), so a partial match here means something changed
+        # (expired, wrong token) and is treated as a conflict rather than silently
+        # completing a partial claim.
+        _ensure_slot_locks_index()
+        micro_keys = _micro_slot_keys(start_minutes, duration_minutes)
+        expected_key_count = len(rig_ids) * len(micro_keys)
+
+        client = get_client()
+        if client is None:
+            return {"status": "error", "message": "Database connection unavailable."}, 500
+
+        debited = None
+        try:
+            with client.start_session() as session:
+                with session.start_transaction():
+                    if wallet_portion > 0:
+                        debited = db_main.wallet_balances.find_one_and_update(
+                            {"user_email": user_email, "cafe_id": cafe_id, "balance": {"$gte": wallet_portion}},
+                            {"$inc": {"balance": -wallet_portion}, "$set": {"updated_at": datetime.now(IST)}},
+                            session=session,
+                            return_document=ReturnDocument.AFTER,
+                        )
+                        if debited is None:
+                            raise _WalletInsufficientBalance()
+
+                    if hold_token:
+                        confirm_result = db_main.slot_locks.update_many(
+                            {"cafe_id": cafe_id, "rig": {"$in": rig_ids}, "date": date,
+                             "slot": {"$in": micro_keys}, "owner_token": hold_token},
+                            {"$unset": {"expires_at": "", "owner_token": ""}},
+                            session=session,
+                        )
+                        if confirm_result.modified_count != expected_key_count:
+                            # A real hold covers its full key set atomically — a partial
+                            # match means the hold expired or belonged to a different
+                            # attempt. Raise the same conflict path a losing insert would.
+                            raise DuplicateKeyError("Hold confirmation incomplete")
+                    else:
+                        lock_docs = [
+                            {"cafe_id": cafe_id, "rig": rid, "date": date, "slot": key}
+                            for rid in rig_ids for key in micro_keys
+                        ]
+                        db_main.slot_locks.insert_many(lock_docs, ordered=True, session=session)
+
+                    result = db_main.bookings.insert_one(booking_doc, session=session)
+                    booking_doc["_id"] = result.inserted_id
+
+                    if wallet_portion > 0:
+                        assert debited is not None
+                        db_main.wallet_transactions.insert_one({
+                            "user_email": user_email,
+                            "cafe_id": cafe_id,
+                            "type": "spend",
+                            "amount": wallet_portion,
+                            "balance_after": debited["balance"],
+                            "order_id": None,
+                            "booking_ids": [str(booking_doc["_id"])],
+                            "settlement": None,
+                            "created_at": datetime.now(IST),
+                        }, session=session)
+        except _WalletInsufficientBalance:
+            if hold_token:
+                release_rig_hold(cafe_id, date, rig_ids, start_minutes, duration_minutes, hold_token)
+            if cashfree_portion > 0:
+                return {
+                    "status": "error",
+                    "message": (
+                        "Your wallet balance changed and this booking's payment was already "
+                        "captured — contact support for a refund, and please try a different time."
+                    ),
+                }, 409
+            return {"status": "error", "message": "Your wallet balance changed just now — please try again."}, 409
+        except (DuplicateKeyError, OperationFailure) as e:
+            is_conflict = getattr(e, "code", None) == 11000 or "E11000" in str(e) or "Hold confirmation incomplete" in str(e)
+            if hold_token:
+                release_rig_hold(cafe_id, date, rig_ids, start_minutes, duration_minutes, hold_token)
+            if is_conflict:
+                return {
+                    "status": "error",
+                    "message": (
+                        "One or more selected stations were just booked by someone else. Your "
+                        "payment was captured — contact support for a refund, and please try a "
+                        "different time or station."
+                    ),
+                }, 409
+            if hasattr(e, "has_error_label") and e.has_error_label("TransientTransactionError"):
+                return {"status": "error", "message": "That couldn't be confirmed right now — please try again."}, 409
+            return {"status": "error", "message": f"Booking transaction failed: {e}"}, 500
+
+        booking_doc["id"] = str(booking_doc["_id"])
+        del booking_doc["_id"]
+        booking_doc["createdAt"] = booking_doc["createdAt"].isoformat()
+        rig_display = ", ".join(rig_names_by_id[rid] for rid in rig_ids)
+        slot_display = f"{_minutes_to_display(start_minutes)} - {_minutes_to_display(end_minutes)}"
+
+        try:
+            send_booking_confirmation_email(
+                recipient=user_email, user_name=user_name, cafe_name=cafe_name,
+                rig=rig_display, zone=zone, date=date, slot=slot_display,
+                price=total_price, code=code,
+            )
+            cafe_owner_email = None
+            if cafe_id and ObjectId.is_valid(cafe_id):
+                cafe_doc = db_main.cafes.find_one({"_id": ObjectId(cafe_id)}, {"owner_email": 1})
+                cafe_owner_email = cafe_doc.get("owner_email") if cafe_doc else None
+            if cafe_owner_email:
+                send_booking_admin_notification_email(
+                    recipient=cafe_owner_email, user_name=user_name, user_phone=user_phone,
+                    cafe_name=cafe_name, rig=rig_display, zone=zone, date=date,
+                    slot=slot_display, price=total_price, code=code,
+                )
+        except Exception as email_err:
+            print(f"[BookMyConsole] Group booking confirmation email failed (booking still saved): {email_err}")
+
+        return {"status": "success", "message": "Booking secured successfully", "booking": booking_doc}, 201
+
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to create booking: {str(e)}"}, 500
 
 
 def create_booking_handler(user_email: str, cafe_id: str, cafe_name: str, zone: str, date: str, slots: list, rig: "str | None" = None, user_name: "str | None" = None, user_phone: str = "", cashfree_order_id: "str | None" = None, coupon_code: "str | None" = None, offer_id: "str | None" = None, use_wallet: bool = False):
@@ -820,20 +1370,32 @@ def get_user_bookings_handler(user_email: str, cafe_id: str = None, date: str = 
                     query["user_email"] = user_email
                     bookings = db_main.bookings.find(query).sort("createdAt", -1)
         
+        bookings = list(bookings)
+
+        # Back-compat: a new-shape (rig_ids/start_time/duration_minutes) booking has no
+        # `rig`/`slot` display strings of its own — batch-resolve rig names once up front
+        # (not per booking, avoiding N+1 queries) so every existing consumer of this
+        # response (mobile history, admin dashboards) can keep reading `rig`/`slot`
+        # unmodified regardless of which booking model produced the row.
+        all_rig_ids = {rid for b in bookings if b.get("rig_ids") for rid in b["rig_ids"] if ObjectId.is_valid(rid)}
+        rig_names_by_id = {}
+        if all_rig_ids:
+            rig_names_by_id = {
+                str(rd["_id"]): rd.get("name", "")
+                for rd in db_main.rigs.find({"_id": {"$in": [ObjectId(r) for r in all_rig_ids]}}, {"name": 1})
+            }
+
         bookings_list = []
         for b in bookings:
             b_id = str(b["_id"])
-            slots = b.get("slots", [])
             del b["_id"]
-            
+
             if "createdAt" in b:
                 if isinstance(b["createdAt"], datetime):
                     b["createdAt"] = b["createdAt"].isoformat()
                 else:
                     b["createdAt"] = str(b["createdAt"])
-            
-            slot_str = ", ".join(slots)
-            
+
             # Recalculate status dynamically based on current time and DB state
             actual_end_at_raw = b.get("actual_end_at")
             actual_end_at_dt = None
@@ -850,10 +1412,31 @@ def get_user_bookings_handler(user_email: str, cafe_id: str = None, date: str = 
                 except Exception:
                     actual_end_at_dt = None
 
-            status, remaining_time = calculate_booking_status_and_time(
-                b.get("date"), slots, db_status=b.get("status", "Upcoming"), actual_end_at=actual_end_at_dt
-            )
-            
+            rig_ids = b.get("rig_ids")
+            if rig_ids:
+                # New-shape group booking — synthesize the same slot/rig display strings
+                # the old model produces, from start_time/duration_minutes/rig_ids.
+                start_minutes = _time_str_to_minutes(b.get("start_time"))
+                duration_minutes = b.get("duration_minutes") or 0
+                slot_str = f"{_minutes_to_display(start_minutes)} - {_minutes_to_display(start_minutes + duration_minutes)}" if start_minutes is not None else ""
+                rig_display = ", ".join(rig_names_by_id.get(rid, rid) for rid in rig_ids)
+                try:
+                    if start_minutes is None:
+                        raise ValueError("Malformed start_time on booking")
+                    start_dt, end_dt = parse_window(b.get("date"), start_minutes, duration_minutes)
+                    status, remaining_time = calculate_status_from_window(
+                        b.get("date"), start_dt, end_dt, db_status=b.get("status", "Upcoming"), actual_end_at=actual_end_at_dt
+                    )
+                except Exception:
+                    status, remaining_time = b.get("status", "Upcoming"), 0
+            else:
+                slots = b.get("slots", [])
+                slot_str = ", ".join(slots)
+                rig_display = b.get("rig")
+                status, remaining_time = calculate_booking_status_and_time(
+                    b.get("date"), slots, db_status=b.get("status", "Upcoming"), actual_end_at=actual_end_at_dt
+                )
+
             item = {
                 "id": b_id,
                 "cafeId": b.get("cafe_id"),
@@ -864,20 +1447,27 @@ def get_user_bookings_handler(user_email: str, cafe_id: str = None, date: str = 
                 "price": b.get("price"),
                 "code": b.get("code"),
                 "status": status,
-                "rig": b.get("rig"),
+                "rig": rig_display,
                 "userEmail": b.get("user_email"),
                 "userName": b.get("user_name"),
                 "userPhone": b.get("user_phone") or b.get("userPhone") or "",
                 "paymentStatus": b.get("payment_status") or b.get("paymentStatus") or "paid",
                 "createdAt": b.get("createdAt"),
             }
+            # New fields, additive-only — ignored by any client that doesn't know about
+            # them yet, used by the updated mobile UI going forward.
+            if rig_ids:
+                item["rigIds"] = rig_ids
+                item["game"] = b.get("game")
+                item["numPlayers"] = b.get("num_players")
+                item["rigSessions"] = b.get("rig_sessions") or {}
             if status == "Active":
                 item["remainingTimeSeconds"] = remaining_time
                 if actual_end_at_raw:
                     item["actualEndAt"] = actual_end_at_raw
                 if b.get("started_at"):
                     item["startedAt"] = b.get("started_at")
-                
+
             bookings_list.append(item)
             
         return {

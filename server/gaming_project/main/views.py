@@ -12,7 +12,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.throttling import ScopedRateThrottle
-from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, payouts, auth_handler, bookings_handler, auth_middleware, favorites, sessions, offers, users, partner_applications, subscriptions, notifications, support, wallet
+from .Handlers import status_check, db_check, cafes, tournaments, bookings, rigs, payments, payouts, auth_handler, bookings_handler, auth_middleware, favorites, sessions, offers, users, partner_applications, subscriptions, notifications, support, wallet, game_images
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
@@ -51,6 +51,7 @@ class CafeListCreateView(APIView):
         latitude = request.query_params.get("latitude")
         longitude = request.query_params.get("longitude")
         include_deleted = request.query_params.get("include_deleted") == "true"
+        game = request.query_params.get("game")
 
         if include_deleted:
             # SECURITY: soft-deleted cafes carry owner PII (email/phone/address) —
@@ -59,7 +60,7 @@ class CafeListCreateView(APIView):
             if error_response:
                 return error_response
 
-        response = cafes.get_cafes_handler(latitude=latitude, longitude=longitude, include_deleted=include_deleted)
+        response = cafes.get_cafes_handler(latitude=latitude, longitude=longitude, include_deleted=include_deleted, game=game)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(response, status=status.HTTP_200_OK)
@@ -784,10 +785,33 @@ class BookingListCreateView(APIView):
         email, error_response = auth_middleware.authenticate_request(request)
         if error_response:
             return error_response
-            
+
         data = request.data
         print("[DEBUG POST /bookings/] Incoming data:", data)
-        
+
+        rig_ids = data.get("rig_ids") or data.get("rigIds")
+        if rig_ids:
+            # New flexible-duration, multi-rig group booking — see
+            # bookings_handler.create_group_booking_handler.
+            result, status_code = bookings_handler.create_group_booking_handler(
+                user_email          = email,
+                cafe_id             = data.get("cafe_id") or data.get("cafeId"),
+                cafe_name           = data.get("cafe_name") or data.get("cafeName"),
+                rig_ids             = rig_ids,
+                game                = data.get("game"),
+                num_players         = data.get("num_players") or data.get("numPlayers"),
+                date                = data.get("date") or data.get("bookingDate") or data.get("booking_date"),
+                start_time          = data.get("start_time") or data.get("startTime"),
+                duration_minutes    = data.get("duration_minutes") or data.get("durationMinutes"),
+                user_name           = data.get("customerName") or data.get("customer_name") or data.get("userName") or data.get("user_name"),
+                user_phone          = data.get("customerPhone") or data.get("customer_phone") or data.get("userPhone") or data.get("user_phone") or "",
+                cashfree_order_id   = data.get("cashfree_order_id"),
+                coupon_code         = data.get("coupon_code"),
+                offer_id            = data.get("offer_id"),
+                use_wallet          = bool(data.get("use_wallet") or data.get("useWallet")),
+            )
+            return Response(result, status=status_code)
+
         # Explicit slots parsing to prevent operator precedence bugs
         slots = data.get("slots")
         if not slots:
@@ -820,6 +844,22 @@ class BookingListCreateView(APIView):
         )
         return Response(result, status=status_code)
 
+
+class CafeRigAvailabilityView(APIView):
+    """GET /cafes/<cafe_id>/rigs/availability/?date=YYYY-MM-DD — every rig's busy time
+    intervals for that date (both booking models), for the mobile time/seat picker to
+    compute per-candidate-window eligibility and the "nearest time any eligible rig frees
+    up" smart-default. Read-only, no PII — open to any authenticated customer."""
+    def get(self, request, cafe_id):
+        email, error_response = auth_middleware.authenticate_request(request)
+        if error_response:
+            return error_response
+        date = request.query_params.get("date")
+        if not date:
+            return Response({"status": "error", "message": "Missing 'date' query parameter."}, status=status.HTTP_400_BAD_REQUEST)
+        result, status_code = bookings_handler.get_rig_availability_handler(cafe_id, date)
+        return Response(result, status=status_code)
+
 # ── Tournaments ────────────────────────────────────────────────────────────────
 
 class TournamentListCreateView(APIView):
@@ -828,7 +868,8 @@ class TournamentListCreateView(APIView):
 
     def get(self, request):
         cafe_id = request.query_params.get("cafe_id") or request.query_params.get("cafeId")
-        response = tournaments.get_tournaments_handler(cafe_id=cafe_id)
+        featured_only = request.query_params.get("featured_only") == "true"
+        response = tournaments.get_tournaments_handler(cafe_id=cafe_id, featured_only=featured_only)
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(response, status=status.HTTP_200_OK)
@@ -1296,14 +1337,21 @@ class CafeBookingOrderCreateView(APIView):
         amount = request.data.get("amount")
         if amount is None:
             return Response({"status": "error", "message": "Missing 'amount' parameter"}, status=status.HTTP_400_BAD_REQUEST)
-        # zone/date/slots/rig are only sent by the slot-booking checkout flow (never
-        # tournament entry, which has no slot) — when present they let order creation
-        # reject an already-taken slot BEFORE payment instead of after.
+        # zone/date/slots/rig are the OLD fixed-hourly-slot checkout's params; rig_ids/
+        # start_time/duration_minutes are the NEW flexible-duration group booking's —
+        # whichever set the client sends lets order creation hold that exact window
+        # BEFORE payment instead of after.
         zone = request.data.get("zone")
         date = request.data.get("date")
         slots = request.data.get("slots")
         rig = request.data.get("rig")
-        response = payments.create_cafe_booking_order_handler(cafe_id, amount, zone=zone, date=date, slots=slots, rig=rig, user_email=email)
+        rig_ids = request.data.get("rig_ids") or request.data.get("rigIds")
+        start_time = request.data.get("start_time") or request.data.get("startTime")
+        duration_minutes = request.data.get("duration_minutes") or request.data.get("durationMinutes")
+        response = payments.create_cafe_booking_order_handler(
+            cafe_id, amount, zone=zone, date=date, slots=slots, rig=rig, user_email=email,
+            rig_ids=rig_ids, start_time=start_time, duration_minutes=duration_minutes,
+        )
         if response.get("status") == "error":
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
         return Response(response, status=status.HTTP_200_OK)
@@ -1769,8 +1817,19 @@ class SessionActionView(APIView):
     def post(self, request, session_id, action):
         from .Handlers.db_connection import get_db
         from bson import ObjectId
+        from bson.errors import InvalidId
         db = get_db()
-        booking = db.bookings.find_one({"_id": ObjectId(session_id)})
+        # session_id here must be the plain booking id — a composite Live Floor tile id
+        # ("bookingId:rigId", see list_sessions_handler) will never be a valid ObjectId.
+        # That used to crash this view with an unhandled 500 instead of a clean error
+        # (and was in fact how the frontend was calling it for every group-booking tile,
+        # fixed separately in floor.tsx — this guard is defense in depth regardless).
+        if not ObjectId.is_valid(session_id):
+            return Response({"status": "error", "message": "Invalid booking id."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            booking = db.bookings.find_one({"_id": ObjectId(session_id)})
+        except InvalidId:
+            return Response({"status": "error", "message": "Invalid booking id."}, status=status.HTTP_400_BAD_REQUEST)
         if not booking:
             return Response({"status": "error", "message": "Booking not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1779,13 +1838,19 @@ class SessionActionView(APIView):
         if error_response:
             return error_response
 
+        # A new-shape group booking's tile id is "bookingId:rigId" (see
+        # list_sessions_handler) — session_id here is only ever the real booking id
+        # (the URL param), so rig_id must come from the request body for these bookings.
+        rig_id = request.data.get("rig_id") or request.data.get("rigId")
         if action == "start":
-            response = sessions.start_session_handler(booking_id=session_id)
+            response = sessions.start_session_handler(booking_id=session_id, rig_id=rig_id)
         elif action == "extend":
             minutes = request.data.get("minutes", 30)
-            response = sessions.extend_session_handler(booking_id=session_id, minutes=minutes)
+            response = sessions.extend_session_handler(booking_id=session_id, minutes=minutes, rig_id=rig_id)
         elif action == "end":
-            response = sessions.end_session_handler(booking_id=session_id)
+            response = sessions.end_session_handler(booking_id=session_id, rig_id=rig_id)
+        elif action == "cancel":
+            response = sessions.cancel_session_handler(booking_id=session_id, rig_id=rig_id)
         else:
             return Response({"status": "error", "message": "Invalid action"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2178,5 +2243,65 @@ class PartnerApplicationDetailView(APIView):
         if not status_val:
             return Response({"error": "Status is required"}, status=status.HTTP_400_BAD_REQUEST)
         result, status_code = partner_applications.update_partner_application_status_handler(app_id, status_val)
+        return Response(result, status=status_code)
+
+
+# ── Game Images (global, platform-wide — not per-cafe) ──────────────────────────
+
+class GameImageListCreateView(APIView):
+    """
+    GET /game-images/ — every game -> image mapping (Public — the mobile game picker
+    needs this before a customer has necessarily logged in; it's small, curated,
+    non-sensitive content, same trust level as GET /cafes/).
+    POST /game-images/ — add a new mapping (Super Admin Only).
+    """
+    parser_classes = (MultiPartParser, FormParser)
+
+    def get(self, request):
+        featured_only = request.query_params.get("featured_only") == "true"
+        result, status_code = game_images.get_game_images_handler(featured_only=featured_only)
+        return Response(result, status=status_code)
+
+    def post(self, request):
+        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        if error_response:
+            return error_response
+        result, status_code = game_images.create_game_image_handler(request.data, request.FILES)
+        return Response(result, status=status_code)
+
+
+class GameImageReorderView(APIView):
+    """
+    POST /game-images/reorder/ — persists a new display order for "Games recommended
+    for you" (Super Admin Only). Body: {"ordered_ids": [id, id, ...]}.
+    """
+
+    def post(self, request):
+        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        if error_response:
+            return error_response
+        result, status_code = game_images.reorder_game_images_handler(request.data.get("ordered_ids"))
+        return Response(result, status=status_code)
+
+
+class GameImageDetailView(APIView):
+    """
+    PUT /game-images/<str:game_image_id>/ — update name and/or image (Super Admin Only).
+    DELETE /game-images/<str:game_image_id>/ — remove a mapping (Super Admin Only).
+    """
+    parser_classes = (MultiPartParser, FormParser)
+
+    def put(self, request, game_image_id):
+        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        if error_response:
+            return error_response
+        result, status_code = game_images.update_game_image_handler(game_image_id, request.data, request.FILES)
+        return Response(result, status=status_code)
+
+    def delete(self, request, game_image_id):
+        email, error_response = auth_middleware.authenticate_super_admin_request(request)
+        if error_response:
+            return error_response
+        result, status_code = game_images.delete_game_image_handler(game_image_id)
         return Response(result, status=status_code)
 

@@ -94,6 +94,11 @@ def _price_for_offer(offer, hourly_price, num_slots):
     offer doesn't apply (e.g. a bulk offer whose min_hours threshold isn't met, or a
     percentage offer with no real discount). Never returns more than the caller would
     pay at the normal rate — callers additionally cap against normal_total themselves.
+
+    num_slots is a plain hour count for the old fixed-hourly-slot booking model, but may
+    also be a FRACTIONAL float (e.g. 1.25) for the new flexible-duration model — both
+    branches below are float-safe (round() rather than the old int()-truncation, which
+    silently discarded a booking's fractional-hour portion of the price entirely).
     """
     mode = offer.get("pricing_mode", "percentage")
     if mode == "bulk":
@@ -102,7 +107,7 @@ def _price_for_offer(offer, hourly_price, num_slots):
         if min_hours <= 0 or bundle_price <= 0 or num_slots < min_hours:
             return None
         extra_slots = num_slots - min_hours
-        return int(bundle_price + extra_slots * hourly_price)
+        return round(bundle_price + extra_slots * hourly_price)
 
     pct = int(offer.get("discount_pct", 0) or 0)
     if pct <= 0:
@@ -113,7 +118,7 @@ def _price_for_offer(offer, hourly_price, num_slots):
     # value, including exact .5 cases, or verify_cashfree_payment's amount check
     # silently diverges by ₹1 and every booking under this offer fails verification.
     per_hour = math.floor(hourly_price * (1 - pct / 100) + 0.5)
-    return int(per_hour * num_slots)
+    return math.floor(per_hour * num_slots + 0.5)
 
 
 def compute_best_price(cafe_id, hourly_price, num_slots, coupon_code=None, offer_id=None):
@@ -125,6 +130,11 @@ def compute_best_price(cafe_id, hourly_price, num_slots, coupon_code=None, offer
     Never trust a client-supplied price or discount for this — every active offer is
     looked up fresh here, same as _resolve_hourly_price does for the base rate.
 
+    num_slots: an integer hour count (old fixed-hourly-slot bookings) OR a fractional
+    float hour count, e.g. 1.25 for a 75-minute flexible-duration booking
+    (create_group_booking_handler passes duration_minutes/60.0) — both are handled
+    identically here and in _price_for_offer, no separate code path needed.
+
     Returns (total_price: int, applied_offer_id: str | None, error: str | None).
 
     NOTHING auto-applies. A customer must explicitly tap Apply on one specific offer in
@@ -134,7 +144,12 @@ def compute_best_price(cafe_id, hourly_price, num_slots, coupon_code=None, offer
     the customer didn't apply anything, and the plain normal_total is what's charged; it
     is never silently swapped for a "best" discount the customer didn't choose.
     """
-    normal_total = int(round(hourly_price)) * int(num_slots)
+    # round() rather than the old int(round(hourly_price)) * int(num_slots) — that
+    # truncated num_slots to a whole number FIRST, silently dropping the entire
+    # fractional-hour portion of the price for a flexible-duration booking. hourly_price
+    # is always a whole-rupee admin-set value in practice, so this produces the exact
+    # same result as before for every existing integer-num_slots booking.
+    normal_total = int(round(hourly_price * num_slots))
     db = get_db()
     if db is None or not cafe_id:
         return normal_total, None, None

@@ -120,3 +120,42 @@ def validate_enum(value, allowed: set, field_name: str, required: bool = True) -
     if value not in allowed:
         return f"{field_name} must be one of: {', '.join(sorted(allowed))}."
     return None
+
+
+def parse_bool(value, default: bool = False) -> bool:
+    """A real Python bool survives multipart/form-data as the string 'true'/'false'
+    (and sometimes 'True'/'False' from different client stringification) — JSON bodies
+    keep the real bool. Handles both. None (field omitted) returns default rather than
+    False, so a caller can distinguish "not sent" from "explicitly false" before calling
+    this at all, same convention already used ad hoc in offers.py."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() == "true"
+
+
+def parse_string_list(value, field_name: str, max_items: int, max_item_len: int):
+    """
+    Parses a client-supplied value into a cleaned list[str] — trims whitespace, drops
+    empty entries, and enforces bounds. Returns (list, error). A dict/int/etc instead of
+    a list (NoSQL-injection-shaped garbage, or just a malformed client) is rejected
+    outright rather than silently coerced.
+    """
+    if value is None:
+        return [], None
+    if not isinstance(value, list):
+        return None, f"{field_name} must be a list of strings."
+    cleaned = []
+    for item in value:
+        if not isinstance(item, str):
+            return None, f"{field_name} must contain only strings."
+        item = item.strip()
+        if not item:
+            continue
+        if len(item) > max_item_len:
+            return None, f"Each {field_name} entry must be at most {max_item_len} characters."
+        cleaned.append(item)
+    if len(cleaned) > max_items:
+        return None, f"{field_name} can have at most {max_items} entries."
+    return cleaned, None

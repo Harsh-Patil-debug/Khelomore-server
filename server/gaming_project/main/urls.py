@@ -29,6 +29,7 @@ urlpatterns = [
     path('cafes/<str:cafe_id>/payment-credentials/verify-password/', CafePaymentPasswordVerifyView.as_view(), name='cafe_payment_password_verify'),
     path('cafes/<str:cafe_id>/payments/create-order/', CafeBookingOrderCreateView.as_view(), name='cafe_booking_order_create'),
     path('cafes/<str:cafe_id>/payments/release-hold/', CafeBookingReleaseHoldView.as_view(), name='cafe_booking_release_hold'),
+    path('cafes/<str:cafe_id>/rigs/availability/', CafeRigAvailabilityView.as_view(), name='cafe_rig_availability'),
     path('cafes/<str:cafe_id>/payouts/beneficiary/', CafePayoutBeneficiaryView.as_view(), name='cafe_payout_beneficiary'),
     path('cafes/<str:cafe_id>/payouts/settle/', CafePayoutSettleView.as_view(), name='cafe_payout_settle'),
 
@@ -128,5 +129,10 @@ urlpatterns = [
     path('stats/', PlatformStatsView.as_view(), name='platform_stats'),             # PUBLIC
     path('partner-applications/', PartnerApplicationListCreateView.as_view(), name='partner_applications'),
     path('partner-applications/<str:app_id>/', PartnerApplicationDetailView.as_view(), name='partner_application_detail'),
+
+    # ── Game Images (global, platform-wide) ──────────────────────────────────────
+    path('game-images/', GameImageListCreateView.as_view(), name='game_images'),
+    path('game-images/reorder/', GameImageReorderView.as_view(), name='game_images_reorder'),
+    path('game-images/<str:game_image_id>/', GameImageDetailView.as_view(), name='game_image_detail'),
 ]
 
