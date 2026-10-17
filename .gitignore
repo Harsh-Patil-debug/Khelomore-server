@@ -34,6 +34,9 @@ mediafiles/
 # were left behind.
 server/scratch/
 
+# ── Security scan run output (contains live secrets found during the scan) ────
+strix_runs/
+
 # ── IDE / Editor ──────────────────────────────────────────────────────────────
 .vscode/
 .idea/
