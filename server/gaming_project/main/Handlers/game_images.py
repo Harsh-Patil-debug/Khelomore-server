@@ -63,6 +63,12 @@ def _map_doc(doc: dict) -> dict:
         # Display order in "Games recommended for you" — super-admin controlled via
         # reorder_game_images_handler below, not alphabetical.
         "order": doc.get("order", 0),
+        # The game's actual Windows process name (e.g. "VALORANT-Win64-Shipping.exe"),
+        # set by a super admin so the PC agent knows what to close when a session using
+        # this game ends — see rigs.py's _resolve_active_session_for_rig. Optional: a
+        # game with no process_name configured just can't auto-close (the cafe admin can
+        # still use the manual Shutdown button as a fallback for that station).
+        "processName": doc.get("process_name") or "",
         "createdAt": doc.get("created_at").isoformat() if isinstance(doc.get("created_at"), datetime) else None,
         "updatedAt": doc.get("updated_at").isoformat() if isinstance(doc.get("updated_at"), datetime) else None,
     }
@@ -147,12 +153,19 @@ def create_game_image_handler(data, files=None):
         print(f"[Cloudinary] Game image upload failed: {upload_err}")
         return {"status": "error", "message": "Image upload failed. Please try again."}, 502
 
+    process_name = (data.get("process_name") or data.get("processName") or "").strip()
+    if process_name:
+        process_name_error = input_validation.validate_text(process_name, "Process name", max_len=100)
+        if process_name_error:
+            return {"status": "error", "message": process_name_error}, 400
+
     now = datetime.now(timezone.utc)
     doc = {
         "name": name,
         "name_normalized": name_normalized,
         "image_url": image_url,
         "featured": input_validation.parse_bool(data.get("featured"), default=True),
+        "process_name": process_name,
         # Appends to the end of "Games recommended for you" by default.
         "order": db.game_images.count_documents({}),
         "created_at": now,
@@ -205,6 +218,15 @@ def update_game_image_handler(game_image_id, data, files=None):
 
     if data.get("featured") is not None:
         update_fields["featured"] = input_validation.parse_bool(data.get("featured"))
+
+    process_name_raw = data.get("process_name") if data.get("process_name") is not None else data.get("processName")
+    if process_name_raw is not None:
+        process_name = process_name_raw.strip()
+        if process_name:
+            process_name_error = input_validation.validate_text(process_name, "Process name", max_len=100)
+            if process_name_error:
+                return {"status": "error", "message": process_name_error}, 400
+        update_fields["process_name"] = process_name
 
     if not update_fields:
         return {"status": "error", "message": "No fields to update."}, 400

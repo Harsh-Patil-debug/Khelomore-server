@@ -18,12 +18,17 @@ def start_scheduler():
         return
 
     from .notifications import send_due_session_end_notifications
+    from .sessions import auto_complete_expired_sessions
 
     def _tick():
         try:
             send_due_session_end_notifications()
         except Exception as e:
             print(f"[Scheduler] send_due_session_end_notifications tick failed: {e}")
+        try:
+            auto_complete_expired_sessions()
+        except Exception as e:
+            print(f"[Scheduler] auto_complete_expired_sessions tick failed: {e}")
 
     _scheduler = BackgroundScheduler(daemon=True)
     _scheduler.add_job(
@@ -35,4 +40,4 @@ def start_scheduler():
         coalesce=True,
     )
     _scheduler.start()
-    print("[Scheduler] Background scheduler started (session-end notifications every 60s).")
+    print("[Scheduler] Background scheduler started (session-end notifications + auto-complete every 60s).")

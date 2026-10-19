@@ -131,6 +131,61 @@ def send_broadcast_notification_handler(title: str, body: str, audience: str, se
 STALE_END_NOTIFICATION_CUTOFF_MINUTES = 15
 
 
+def _notify_expired_group_rigs(booking: dict, now: datetime) -> int:
+    """New-shape (group/multi-rig) booking variant of the loop below — a group booking's
+    REAL end time lives per-rig under rig_sessions[rig_id].actual_end_at (each PC can be
+    started/ended independently, see start_session_handler), never at the booking's top
+    level. Scanning only the top-level field (as this function used to, unconditionally)
+    matched zero group bookings ever, since that field simply doesn't exist on them — the
+    same bug class already fixed this session in check_multi_rig_window_conflict and
+    get_user_bookings_handler, here causing every group booking's customer to silently
+    never receive a 'Session ended' push. Tracks end_notification_sent PER RIG (nested the
+    same way), since different stations in the same group booking can genuinely end at
+    different times if they were started separately."""
+    rig_sessions = booking.get("rig_sessions") or {}
+    if not rig_sessions:
+        return 0
+
+    sent = 0
+    updates = {}
+    for rig_id, rs in rig_sessions.items():
+        if rs.get("end_notification_sent"):
+            continue
+        raw_end = rs.get("actual_end_at")
+        if not raw_end:
+            continue
+        try:
+            end_dt = datetime.fromisoformat(raw_end)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=IST)
+        except (TypeError, ValueError):
+            updates[f"rig_sessions.{rig_id}.end_notification_sent"] = True
+            continue
+
+        if end_dt > now:
+            continue  # not due yet - leave unflagged for a later tick
+
+        is_stale = (now - end_dt) > timedelta(minutes=STALE_END_NOTIFICATION_CUTOFF_MINUTES)
+        if not is_stale:
+            user_email = booking.get("user_email")
+            token_doc = db_main.push_tokens.find_one({"user_email": user_email}) if user_email else None
+            if token_doc and token_doc.get("expo_push_token"):
+                rig_doc = db_main.rigs.find_one({"_id": ObjectId(rig_id)}, {"name": 1}) if ObjectId.is_valid(rig_id) else None
+                rig_name = (rig_doc or {}).get("name", "")
+                station = f" on {rig_name}" if rig_name else ""
+                accepted = _send_expo_push_batch(
+                    [token_doc["expo_push_token"]],
+                    "Session ended",
+                    f"Your booking{station} has ended. Thanks for playing!",
+                )
+                sent += accepted
+        updates[f"rig_sessions.{rig_id}.end_notification_sent"] = True
+
+    if updates:
+        db_main.bookings.update_one({"_id": booking["_id"]}, {"$set": updates})
+    return sent
+
+
 def send_due_session_end_notifications() -> int:
     """Scans for bookings whose session has actually finished (actual_end_at has passed)
     and pushes a one-time 'Session ended' notification to that specific booking's user.
@@ -147,13 +202,24 @@ def send_due_session_end_notifications() -> int:
     forever), so it's safe to call this on every scheduler tick."""
     try:
         now = datetime.now(IST)
+        # Candidates: old-shape bookings with a top-level actual_end_at, OR any group
+        # booking (rig_ids present) — the latter's real per-rig end times/notified-flags
+        # live nested under rig_sessions and are checked individually below, since a
+        # single flat end_notification_sent on the booking can't represent "this rig's
+        # done, that one isn't yet."
         candidates = db_main.bookings.find({
-            "actual_end_at": {"$exists": True, "$ne": None},
-            "end_notification_sent": {"$ne": True},
+            "$or": [
+                {"actual_end_at": {"$exists": True, "$ne": None}, "end_notification_sent": {"$ne": True}},
+                {"rig_ids": {"$exists": True, "$ne": []}},
+            ]
         })
 
         sent = 0
         for booking in candidates:
+            if booking.get("rig_ids"):
+                sent += _notify_expired_group_rigs(booking, now)
+                continue
+
             raw_end = booking.get("actual_end_at")
             try:
                 end_dt = datetime.fromisoformat(raw_end)

@@ -74,6 +74,7 @@ def list_sessions_handler(cafe_id: str):
         return {"status": "error", "message": "MongoDB connection is not established."}
 
     try:
+        from .bookings_handler import _time_str_to_minutes, parse_window, _minutes_to_display
         now = datetime.now(IST)
         today_str = now.strftime("%Y-%m-%d")
 
@@ -104,7 +105,6 @@ def list_sessions_handler(cafe_id: str):
                 # that rig's own rig_sessions sub-state, since sessions are started/ended
                 # independently per rig (see create_group_booking_handler's rig_sessions
                 # field and the feature plan's explicit per-rig decision).
-                from .bookings_handler import _time_str_to_minutes, parse_window, _minutes_to_display
                 b_id = str(b["_id"])
                 b_date = b.get("date")
                 is_today = (b_date == today_str)
@@ -166,6 +166,12 @@ def list_sessions_handler(cafe_id: str):
                         "start_at": rs.get("started_at") or window_start.isoformat(),
                         "scheduled_end_at": synced_end.isoformat(),
                         "time_label": f"{b_date} · {_minutes_to_display(start_minutes)} - {_minutes_to_display(start_minutes + duration_minutes)}",
+                        # The booked SLOT's start (never the actual QR-scan activation
+                        # time, which can run late) — Live Floor groups tiles by this, not
+                        # by rig, so every station booked for the same slot lands under
+                        # one time-section together.
+                        "scheduled_start_minutes": start_minutes,
+                        "scheduled_start_label": _minutes_to_display(start_minutes),
                         "status": "active" if rs_status == "Active" else "reserved",
                     })
                 continue
@@ -245,6 +251,8 @@ def list_sessions_handler(cafe_id: str):
                 "start_at": b.get("started_at") or earliest_start.isoformat(),
                 "scheduled_end_at": synced_end.isoformat(),
                 "time_label": f"{b.get('date', today_str)} · {b.get('slot') or ', '.join(slots)}",
+                "scheduled_start_minutes": earliest_start.hour * 60 + earliest_start.minute,
+                "scheduled_start_label": _minutes_to_display(earliest_start.hour * 60 + earliest_start.minute),
                 "status": "active" if b_status == "Active" else "reserved"
             })
 
@@ -560,6 +568,75 @@ def cancel_session_handler(booking_id: str, rig_id: "str | None" = None):
         return {"status": "success", "message": "Reservation cancelled."}
     except Exception as e:
         return {"status": "error", "message": f"Failed to cancel reservation: {e}"}
+
+
+def auto_complete_expired_sessions() -> int:
+    """Scheduler-driven counterpart to end_session_handler: automatically ends (marks
+    Completed, frees the rig, releases its slot_locks) any Active session whose
+    actual_end_at has genuinely passed, instead of waiting indefinitely for an admin to
+    tap "End Session" on Live Floor. Deliberately calls end_session_handler itself for
+    the actual completion rather than duplicating its logic, so a session ended manually
+    and one ended automatically by timeout can never drift apart or handle group-booking
+    per-rig state differently.
+
+    Checked every scheduler tick (see scheduler.py) alongside the "session ended" push
+    notification — a session can be auto-completed and notified in the same tick, or
+    across different ticks, independently; this and send_due_session_end_notifications
+    don't depend on each other's order.
+
+    Returns how many individual sessions (old-shape bookings, or one rig within a group
+    booking) were actually completed this call."""
+    db_main = get_db()
+    if db_main is None:
+        return 0
+    completed = 0
+    try:
+        now = datetime.now(IST)
+
+        def _is_due(raw_end: "str | None") -> bool:
+            if not raw_end:
+                return False
+            try:
+                end_dt = datetime.fromisoformat(raw_end)
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=IST)
+            except (TypeError, ValueError):
+                return False
+            return end_dt <= now
+
+        # Candidates: old-shape Active bookings (top-level actual_end_at), or any group
+        # booking (rig_ids present) — the latter's real per-rig Active status/end times
+        # live nested under rig_sessions and are checked individually below, mirroring
+        # the identical broadened-query pattern already used for the push-notification
+        # scheduler (same underlying bug class: a flat top-level check matches zero group
+        # bookings, since that shape never sets the top-level field at all).
+        bookings = db_main.bookings.find({
+            "$or": [
+                {"status": "Active"},
+                {"rig_ids": {"$exists": True, "$ne": []}},
+            ]
+        })
+        for b in bookings:
+            booking_id = str(b["_id"])
+            if b.get("rig_ids"):
+                rig_sessions = b.get("rig_sessions") or {}
+                for rig_id, rs in rig_sessions.items():
+                    if rs.get("status") != "Active" or not _is_due(rs.get("actual_end_at")):
+                        continue
+                    result = end_session_handler(booking_id, rig_id)
+                    if result.get("status") == "success":
+                        completed += 1
+            else:
+                if b.get("status") != "Active" or not _is_due(b.get("actual_end_at")):
+                    continue
+                result = end_session_handler(booking_id)
+                if result.get("status") == "success":
+                    completed += 1
+
+        return completed
+    except Exception as e:
+        print(f"[Scheduler] auto_complete_expired_sessions failed: {e}")
+        return completed
 
 
 def extend_session_handler(booking_id: str, minutes: int, rig_id: "str | None" = None):

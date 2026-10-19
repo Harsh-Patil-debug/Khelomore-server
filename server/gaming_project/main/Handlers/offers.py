@@ -149,7 +149,18 @@ def compute_best_price(cafe_id, hourly_price, num_slots, coupon_code=None, offer
     # fractional-hour portion of the price for a flexible-duration booking. hourly_price
     # is always a whole-rupee admin-set value in practice, so this produces the exact
     # same result as before for every existing integer-num_slots booking.
-    normal_total = int(round(hourly_price * num_slots))
+    #
+    # math.floor(x + 0.5), not the plain round() above the old comment described — Python's
+    # round() is banker's rounding (round-half-to-even), which disagrees with JS's
+    # Math.round (round-half-up) on exact .5 boundaries (e.g. round(128.5) -> 128 in
+    # Python, Math.round(128.5) -> 129 in JS). The MOBILE CLIENT computes this exact same
+    # normal-total with Math.round (cafe/[id].tsx's normalTotal) to size the real Cashfree
+    # order amount actually charged — verify_cashfree_payment then compares that real
+    # charge against THIS value. A ±1 disagreement here means a customer who genuinely
+    # paid gets rejected with "Payment verification failed", money captured, no booking
+    # created. Same exact fix _price_for_offer already applies below for the discounted
+    # price — this is the missing twin for the plain (no-offer) total.
+    normal_total = math.floor(hourly_price * num_slots + 0.5)
     db = get_db()
     if db is None or not cafe_id:
         return normal_total, None, None

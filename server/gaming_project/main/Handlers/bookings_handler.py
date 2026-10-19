@@ -169,9 +169,38 @@ def _micro_slot_keys(start_minutes: int, duration_minutes: int) -> list:
     return [_minutes_to_time_str(m) for m in range(start_minutes, start_minutes + duration_minutes, MICRO_SLOT_MINUTES)]
 
 
-def validate_booking_window(start_time: str, duration_minutes) -> "tuple[int | None, int | None, str | None]":
+def _closing_minutes_from_cafe(cafe_doc: "dict | None") -> "int | None":
+    """Minutes-since-midnight the cafe actually closes, from its operating_hours.close.
+    Falls back to the same default (10:00-23:00) _map_cafe_doc (cafes.py) injects when a
+    cafe hasn't explicitly configured operating_hours yet — every cafe the mobile app
+    ever displays already shows/enforces that default close time in its own time grid, so
+    this must agree with it exactly, not silently go unenforced for that same cafe here.
+    Mirrors generate_slots_from_hours' exact next-day convention (cafes.py): a close time
+    <= open time (e.g. open '10:00', close '00:00') means midnight at the END of the
+    operating day, i.e. 24:00/1440, not the first minute of the current calendar day — so
+    'closes at 00:00' means the cafe is open right up to midnight, not closed before it
+    opens."""
+    hours = (cafe_doc or {}).get("operating_hours") or {"open": "10:00", "close": "23:00"}
+    open_str, close_str = hours.get("open", "10:00"), hours.get("close", "23:00")
+    open_minutes = _time_str_to_minutes(open_str)
+    close_minutes = _time_str_to_minutes(close_str)
+    if open_minutes is None or close_minutes is None:
+        return None
+    if close_minutes <= open_minutes:
+        close_minutes += 24 * 60
+    return close_minutes
+
+
+def validate_booking_window(start_time: str, duration_minutes, closing_minutes: "int | None" = None) -> "tuple[int | None, int | None, str | None]":
     """Validates a candidate (start_time, duration_minutes) pair. Returns
-    (start_minutes, duration_minutes, error) — error is None on success."""
+    (start_minutes, duration_minutes, error) — error is None on success.
+
+    closing_minutes (from _closing_minutes_from_cafe) additionally requires the booking
+    to fit entirely before the cafe actually closes — e.g. a cafe closing at midnight
+    can't be booked for a fresh 1-hour session starting 11:45pm, even though that window
+    doesn't cross the calendar-day boundary the 24*60 check below still separately
+    enforces (a 1am-close cafe still can't be booked for a 23:45 1-hour start that would
+    only be rejected by THIS check, not by the day-rollover one)."""
     start_minutes = _time_str_to_minutes(start_time)
     if start_minutes is None:
         return None, None, "Invalid start time."
@@ -189,6 +218,14 @@ def validate_booking_window(start_time: str, duration_minutes) -> "tuple[int | N
         return None, None, f"Duration must be in {DURATION_INCREMENT_MINUTES}-minute increments."
     if start_minutes + duration_minutes > 24 * 60:
         return None, None, "Booking cannot extend past midnight."
+    if closing_minutes is not None and start_minutes + duration_minutes > closing_minutes:
+        latest_start = closing_minutes - duration_minutes
+        if latest_start < 0:
+            return None, None, f"The cafe closes at {_minutes_to_display(closing_minutes % (24 * 60))} — not enough time left today for a {duration_minutes}-minute booking."
+        return None, None, (
+            f"The cafe closes at {_minutes_to_display(closing_minutes % (24 * 60))} — the latest a "
+            f"{duration_minutes}-minute booking can start is {_minutes_to_display(latest_start % (24 * 60))}."
+        )
     return start_minutes, duration_minutes, None
 
 
@@ -651,7 +688,9 @@ def create_group_booking_handler(user_email: str, cafe_id: str, cafe_name: str, 
         if num_players != len(rig_ids):
             return {"status": "error", "message": "Number of players must match the number of stations selected."}, 400
 
-        start_minutes, duration_minutes, window_error = validate_booking_window(start_time, duration_minutes)
+        cafe_doc = db_main.cafes.find_one({"_id": ObjectId(cafe_id)}, {"operating_hours": 1}) if ObjectId.is_valid(cafe_id) else None
+        closing_minutes = _closing_minutes_from_cafe(cafe_doc)
+        start_minutes, duration_minutes, window_error = validate_booking_window(start_time, duration_minutes, closing_minutes)
         if window_error:
             return {"status": "error", "message": window_error}, 400
 
@@ -1414,6 +1453,39 @@ def get_user_bookings_handler(user_email: str, cafe_id: str = None, date: str = 
 
             rig_ids = b.get("rig_ids")
             if rig_ids:
+                # Group booking — actual_end_at lives per-rig (rig_sessions[rig_id].
+                # actual_end_at, set at that rig's own QR-scan/start moment), never at
+                # the booking's top level, so the actual_end_at_dt computed above (from
+                # the nonexistent b.get("actual_end_at")) is always None here and this
+                # silently fell back to the ORIGINALLY SCHEDULED slot end instead of the
+                # real scan-time-based end — same bug class already fixed in
+                # get_rig_availability_handler/check_multi_rig_window_conflict, just for
+                # this endpoint's displayed countdown instead of availability. list_
+                # sessions_handler (the admin Live Floor) already reads the nested field
+                # correctly, which is exactly why the two screens disagreed. Use the
+                # EARLIEST actual_end_at among this booking's currently-Active rigs — the
+                # soonest any one station in the group actually ends — so the countdown
+                # never overstates how much time is really left.
+                rig_sessions = b.get("rig_sessions") or {}
+                group_actual_ends = []
+                for rid in rig_ids:
+                    rs = rig_sessions.get(rid) or {}
+                    if rs.get("status") != "Active":
+                        continue
+                    raw = rs.get("actual_end_at")
+                    if not raw:
+                        continue
+                    try:
+                        dt = datetime.fromisoformat(raw) if isinstance(raw, str) else raw
+                        if getattr(dt, "tzinfo", None) is None:
+                            dt = dt.replace(tzinfo=IST)
+                        group_actual_ends.append(dt)
+                    except Exception:
+                        continue
+                if group_actual_ends:
+                    actual_end_at_dt = min(group_actual_ends)
+                    actual_end_at_raw = actual_end_at_dt.isoformat()
+
                 # New-shape group booking — synthesize the same slot/rig display strings
                 # the old model produces, from start_time/duration_minutes/rig_ids.
                 start_minutes = _time_str_to_minutes(b.get("start_time"))

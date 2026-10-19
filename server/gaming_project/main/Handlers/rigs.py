@@ -1,9 +1,18 @@
 # rigs.py
 # Handlers for managing PC/Console hardware rigs in BookMyConsole Gaming Hub
 
+import secrets
+from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 from .db_connection import get_db
 from . import input_validation
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# A rig's agent is considered online if it polled within this window — matches the
+# agent's own ~4s poll interval with generous slack for a missed beat or two before
+# flipping the admin UI's indicator, rather than flickering offline on every tiny delay.
+AGENT_ONLINE_WINDOW_SECONDS = 15
 
 # Default rigs template to seed for each cafe
 SEED_RIG_TEMPLATES = [
@@ -55,7 +64,32 @@ def map_rig_doc(doc, cafe_prices=None):
         # booking flow (bookings_handler.create_booking_handler). No games catalog exists
         # anywhere in this codebase by design; this is deliberately just per-rig tags.
         "installed_games": doc.get("installed_games") or [],
+        # Hardware-agent connectivity — never the raw agent_token itself (that's a
+        # secret, only ever returned once by generate_agent_token_handler at pairing
+        # time). hasAgent just means "has this rig ever been paired", independent of
+        # whether it's currently online.
+        "hasAgent": bool(doc.get("agent_token")),
+        "agentConnected": _is_agent_online(doc.get("agent_last_seen")),
+        "agentLastSeen": doc.get("agent_last_seen"),
     }
+
+
+def _is_agent_online(last_seen_raw) -> bool:
+    # Stored (and read back) as an ISO string, never a raw datetime object — pymongo
+    # silently strips tzinfo on read (returns naive UTC) unless the client is configured
+    # tz_aware, which this codebase's db_connection.py isn't; every other
+    # stored-timestamp-compared-to-now field in this codebase (actual_end_at, etc.)
+    # already works around this the same way, by storing .isoformat() strings and
+    # re-parsing with fromisoformat() instead of trusting a raw datetime round-trip.
+    if not last_seen_raw:
+        return False
+    try:
+        last_seen = datetime.fromisoformat(last_seen_raw)
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=IST)
+    except (TypeError, ValueError):
+        return False
+    return (datetime.now(IST) - last_seen) <= timedelta(seconds=AGENT_ONLINE_WINDOW_SECONDS)
 
 def get_rigs_handler(cafe_id=None):
     """Retrieves all rigs or filters by cafe_id. Seeds the database if empty."""
@@ -511,3 +545,154 @@ def reserve_rig_slots_handler(rig_id, data):
         }
     except Exception as e:
         return {"status": "error", "message": f"Failed to reserve slots: {e}"}
+
+
+# ── Hardware agent: pairing, polling, commands ───────────────────────────────────
+# A small background app ("the agent") installed on each physical PC connects OUT to
+# these endpoints (pull model — works regardless of NAT/where the admin panel is opened
+# from, no port-forwarding needed at the cafe). The agent authenticates with a per-rig
+# secret token (X-Agent-Token header), completely separate from the normal cafe-owner
+# JWT scheme used everywhere else in this file — the agent is a machine, not a logged-in
+# user. See the feature plan for the full design (why polling + a local client-side
+# timer gives precise auto-close timing without needing sub-second round trips).
+
+def generate_agent_token_handler(rig_id):
+    """Admin action: (re)pairs a rig with a fresh agent token, shown exactly once in
+    this response — never re-readable afterward, same as any other API-key-style secret.
+    Overwrites any previous token outright, so re-pairing immediately invalidates a
+    lost/leaked old one; the agent config on the PC just needs updating with the new
+    value if it was already set up."""
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        if not ObjectId.is_valid(rig_id):
+            return {"status": "error", "message": "Invalid rig ID format."}
+        rig = db_main.rigs.find_one({"_id": ObjectId(rig_id)})
+        if not rig:
+            return {"status": "error", "message": "Rig not found."}
+
+        token = secrets.token_urlsafe(32)
+        db_main.rigs.update_one({"_id": ObjectId(rig_id)}, {"$set": {"agent_token": token, "agent_last_seen": None}})
+        return {"status": "success", "agent_token": token, "rig_id": rig_id}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to generate agent token: {e}"}
+
+
+def _authenticate_agent(db_main, rig_id, token):
+    """Returns (rig_doc, error_dict). error_dict is None on success."""
+    if not token:
+        return None, {"status": "error", "message": "Missing agent token."}
+    if not ObjectId.is_valid(rig_id):
+        return None, {"status": "error", "message": "Invalid rig ID format."}
+    rig = db_main.rigs.find_one({"_id": ObjectId(rig_id)})
+    if not rig:
+        return None, {"status": "error", "message": "Rig not found."}
+    if not rig.get("agent_token") or not secrets.compare_digest(rig["agent_token"], token):
+        return None, {"status": "error", "message": "Invalid agent token."}
+    return rig, None
+
+
+def _resolve_active_session_for_rig(db_main, rig_id):
+    """The rig's current Active session, if any — {"ends_at": iso, "game": str, "process_name": str|None}
+    or None. New-shape (group) bookings only: a rig's real per-rig status/end-time lives
+    nested under rig_sessions[rig_id], not at the booking's top level (same place every
+    other per-rig feature this session reads it from — list_sessions_handler,
+    get_user_bookings_handler, the push-notification/auto-complete schedulers). Old-shape
+    (legacy slots) bookings are out of scope here, same as those other features."""
+    booking = db_main.bookings.find_one({"rig_ids": rig_id, f"rig_sessions.{rig_id}.status": "Active"})
+    if not booking:
+        return None
+    rs = (booking.get("rig_sessions") or {}).get(rig_id) or {}
+    ends_at = rs.get("actual_end_at")
+    if not ends_at:
+        return None
+    game = (booking.get("game") or "").strip()
+    process_name = None
+    if game:
+        game_doc = db_main.game_images.find_one({"name_normalized": game.lower()}, {"process_name": 1})
+        process_name = (game_doc or {}).get("process_name") or None
+    return {"ends_at": ends_at, "game": game, "process_name": process_name}
+
+
+def agent_poll_handler(rig_id, token):
+    """Called every ~4s by the agent on the PC. Updates agent_last_seen (drives the
+    admin UI's online/offline indicator), and returns both the rig's current active
+    session (so the agent can maintain its own precise local close-the-game timer — see
+    the feature plan) and the oldest still-pending one-off command (e.g. an admin's
+    manual Shutdown click) for this rig, if any."""
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        rig, error = _authenticate_agent(db_main, rig_id, token)
+        if error:
+            return error
+
+        db_main.rigs.update_one({"_id": ObjectId(rig_id)}, {"$set": {"agent_last_seen": datetime.now(IST).isoformat()}})
+
+        active_session = _resolve_active_session_for_rig(db_main, rig_id)
+        command_doc = db_main.rig_commands.find_one(
+            {"rig_id": rig_id, "status": "pending"}, sort=[("created_at", 1)]
+        )
+        command = None
+        if command_doc:
+            command = {"id": str(command_doc["_id"]), "type": command_doc.get("type")}
+
+        return {"status": "success", "active_session": active_session, "command": command}
+    except Exception as e:
+        return {"status": "error", "message": f"Agent poll failed: {e}"}
+
+
+def agent_ack_handler(rig_id, token, command_id, success):
+    """The agent confirms it executed (or failed to execute) a command, so it's never
+    re-delivered on the next poll."""
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        rig, error = _authenticate_agent(db_main, rig_id, token)
+        if error:
+            return error
+        if not ObjectId.is_valid(command_id):
+            return {"status": "error", "message": "Invalid command id."}
+        result = db_main.rig_commands.update_one(
+            {"_id": ObjectId(command_id), "rig_id": rig_id},
+            {"$set": {"status": "delivered" if success else "failed", "acked_at": datetime.now(IST)}},
+        )
+        if result.matched_count == 0:
+            return {"status": "error", "message": "Command not found for this rig."}
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "message": f"Agent ack failed: {e}"}
+
+
+def enqueue_rig_command_handler(rig_id, command_type):
+    """Admin action (e.g. the Live Floor/Systems 'Shutdown' button) — queues a one-off
+    command the agent picks up on its next poll. command_type is kept generic (just
+    'shutdown' today) so a future command type needs no new plumbing here."""
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    try:
+        if not ObjectId.is_valid(rig_id):
+            return {"status": "error", "message": "Invalid rig ID format."}
+        rig = db_main.rigs.find_one({"_id": ObjectId(rig_id)})
+        if not rig:
+            return {"status": "error", "message": "Rig not found."}
+        if command_type not in ("shutdown",):
+            return {"status": "error", "message": f"Unsupported command type: {command_type}"}
+        if not rig.get("agent_token"):
+            return {"status": "error", "message": "This station has no agent paired yet — set one up first."}
+
+        doc = {
+            "rig_id": rig_id,
+            "cafe_id": rig.get("cafe_id"),
+            "type": command_type,
+            "status": "pending",
+            "created_at": datetime.now(IST),
+        }
+        result = db_main.rig_commands.insert_one(doc)
+        return {"status": "success", "command_id": str(result.inserted_id)}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to queue command: {e}"}

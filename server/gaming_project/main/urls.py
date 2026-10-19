@@ -74,6 +74,10 @@ urlpatterns = [
     path('rigs/', RigListCreateView.as_view(), name='rigs'),
     path('rigs/<str:rig_id>/', RigDetailView.as_view(), name='rig_detail'),
     path('rigs/<str:rig_id>/reserve/', RigReserveView.as_view(), name='rig_reserve'),
+    path('rigs/<str:rig_id>/agent/pair/', RigAgentPairView.as_view(), name='rig_agent_pair'),
+    path('rigs/<str:rig_id>/agent/poll/', RigAgentPollView.as_view(), name='rig_agent_poll'),
+    path('rigs/<str:rig_id>/agent/ack/', RigAgentAckView.as_view(), name='rig_agent_ack'),
+    path('rigs/<str:rig_id>/commands/', RigCommandView.as_view(), name='rig_commands'),
 
     # ── Payments ──────────────────────────────────────────────────────────────
     path('payments/create-order/', CashfreeOrderCreateView.as_view(), name='create_cashfree_order'),

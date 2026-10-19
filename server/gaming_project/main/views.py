@@ -6,6 +6,7 @@ Each View calls a handler function and returns the result as a DRF Response.
 ─────────────────────────────────────────────────────────────────────────────
 """
 
+import math
 from django.shortcuts import redirect
 from django.conf import settings
 from rest_framework.views import APIView
@@ -1102,6 +1103,78 @@ class RigReserveView(APIView):
         return Response(response, status=status.HTTP_201_CREATED)
 
 
+def _authenticate_for_rig(request, rig_id):
+    """Shared by every admin-facing (not agent-facing) rig-scoped view below — identical
+    pattern to RigDetailView._authenticate_for_rig, duplicated as a module-level function
+    since it's now needed outside that one class too."""
+    from .Handlers.db_connection import get_db
+    from bson import ObjectId
+    db = get_db()
+    if not db:
+        return None, Response({"status": "error", "message": "Database offline"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    rig = db.rigs.find_one({"_id": ObjectId(rig_id)}) if ObjectId.is_valid(rig_id) else None
+    if not rig:
+        return None, Response({"status": "error", "message": "Rig not found."}, status=status.HTTP_404_NOT_FOUND)
+    cafe_id = rig.get("cafe_id")
+    if cafe_id:
+        return authenticate_admin_owner(request, cafe_id)
+    return auth_middleware.authenticate_super_admin_request(request)
+
+
+class RigAgentPairView(APIView):
+    """POST /rigs/<id>/agent/pair/ — admin action: (re)generates this rig's agent
+    token, shown once in the response. Setting up (or re-pairing) the PC agent app."""
+    def post(self, request, rig_id):
+        email, error_response = _authenticate_for_rig(request, rig_id)
+        if error_response:
+            return error_response
+        response = rigs.generate_agent_token_handler(rig_id)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class RigAgentPollView(APIView):
+    """GET /rigs/<id>/agent/poll/ — called every few seconds by the PC agent itself, not
+    an admin. Authenticated by the X-Agent-Token header against this rig's paired agent
+    token, a completely separate scheme from the normal cafe-owner JWT used everywhere
+    else — the caller here is a machine, not a logged-in user."""
+    def get(self, request, rig_id):
+        token = request.headers.get("X-Agent-Token", "")
+        response = rigs.agent_poll_handler(rig_id, token)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_401_UNAUTHORIZED)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class RigAgentAckView(APIView):
+    """POST /rigs/<id>/agent/ack/ — the agent confirms it executed (or failed) a
+    command. Same X-Agent-Token auth as the poll endpoint above."""
+    def post(self, request, rig_id):
+        token = request.headers.get("X-Agent-Token", "")
+        command_id = request.data.get("command_id")
+        success = str(request.data.get("success", "true")).lower() != "false"
+        response = rigs.agent_ack_handler(rig_id, token, command_id, success)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_401_UNAUTHORIZED if "token" in response.get("message", "").lower() else status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_200_OK)
+
+
+class RigCommandView(APIView):
+    """POST /rigs/<id>/commands/ — admin action (e.g. the Live Floor/Systems "Shutdown"
+    button). Body: {type: "shutdown"}. Queues a one-off command the agent picks up and
+    executes on its next poll."""
+    def post(self, request, rig_id):
+        email, error_response = _authenticate_for_rig(request, rig_id)
+        if error_response:
+            return error_response
+        command_type = request.data.get("type")
+        response = rigs.enqueue_rig_command_handler(rig_id, command_type)
+        if response.get("status") == "error":
+            return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        return Response(response, status=status.HTTP_201_CREATED)
+
+
 class CafeDetailView(APIView):
     """GET /cafes/<id>/ — Detail, PUT /cafes/<id>/ — Update, DELETE /cafes/<id>/ — Remove"""
     def get(self, request, cafe_id):
@@ -1950,7 +2023,16 @@ class ValidateCouponView(APIView):
         if not cafe_id or not (code or offer_id):
             return Response({"status": "error", "message": "cafe_id and (offer_id or code) are required."}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            num_slots = int(hours)
+            # float, not int() — hours is a FRACTIONAL hour count for the flexible-
+            # duration booking model (e.g. 1.25 for a 75-minute booking; cafe/[id].tsx
+            # sends durationMinutes/60 here, same as it sends to create_group_booking_
+            # handler at actual booking time). int(hours) used to truncate this to whole
+            # hours, silently under-pricing/under-discounting any non-whole-hour duration
+            # here while create_group_booking_handler's own compute_best_price call later
+            # used the real, untruncated duration — the mismatch between what got
+            # previewed/charged via Cashfree and what booking creation re-verifies then
+            # failed payment verification outright for a customer who really did pay.
+            num_slots = float(hours)
         except (TypeError, ValueError):
             return Response({"status": "error", "message": "hours must be a number."}, status=status.HTTP_400_BAD_REQUEST)
         if num_slots <= 0:
@@ -1968,7 +2050,14 @@ class ValidateCouponView(APIView):
         return Response({
             "status": "success",
             "total_price": total,
-            "normal_price": int(round(hourly_price)) * num_slots,
+            # Same math.floor(x+0.5) rounding compute_best_price's own normal_total uses
+            # (not the separate int(round(hourly_price)) * num_slots this used to be,
+            # which both disagreed with compute_best_price on rounding AND, with the
+            # int(hours) truncation above gone, would now produce a float here for any
+            # fractional duration instead of a whole-rupee amount) — so the "was ₹X"
+            # strikethrough shown next to an applied offer always matches what the
+            # customer would actually be charged with no offer applied at all.
+            "normal_price": math.floor(hourly_price * num_slots + 0.5),
             "applied_offer_id": applied_offer_id,
         }, status=status.HTTP_200_OK)
 
