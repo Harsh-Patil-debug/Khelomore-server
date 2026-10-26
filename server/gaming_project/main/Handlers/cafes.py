@@ -339,6 +339,14 @@ def map_cafe_doc(doc, user_lat=None, user_lon=None, public=False):
         # payments. Never expose the actual client_id/secret here — see
         # get_cashfree_credentials_status_handler for that (owner/super-admin only).
         "cashfree_configured": bool(doc.get("cashfree_client_id") and doc.get("cashfree_client_secret_enc")),
+
+        # This cafe's own games (not in the global game_images catalog) — unlike a plain
+        # free-typed rig tag, these DO carry a real uploaded image, scoped to this cafe
+        # only (never shown to other cafes). See add_cafe_custom_game_handler.
+        "custom_games": [
+            {"id": g.get("name_normalized"), "name": g.get("name"), "imageUrl": g.get("image_url")}
+            for g in (doc.get("custom_games") or [])
+        ],
     }
 
 
@@ -918,6 +926,72 @@ def get_my_cafes_handler(owner_email, is_super_admin=False):
             "status": "error",
             "message": f"Failed to retrieve my cafes: {e}"
         }
+
+
+def add_cafe_custom_game_handler(cafe_id, data, files=None):
+    """
+    Adds a game (with a real uploaded image, via Cloudinary) to THIS cafe's own list —
+    distinct from the global game_images catalog (platform-wide, super-admin-managed).
+    A cafe-specific game's image/name only ever appears for this one cafe; it's never
+    added to the shared catalog other cafes see.
+
+    The name is capped at the same 40 chars rigs.py's installed_games validation allows
+    (input_validation.parse_string_list's max_item_len) — this name is what eventually
+    gets pushed into a rig's installed_games array when a system picks it, so a longer
+    name here would silently fail there otherwise.
+    """
+    from datetime import datetime, timezone
+
+    db = get_db()
+    if db is None:
+        return {"status": "error", "message": "Database offline"}, 500
+
+    if not ObjectId.is_valid(cafe_id):
+        return {"status": "error", "message": "Invalid cafe id."}, 400
+    cafe = db.cafes.find_one({"_id": ObjectId(cafe_id)})
+    if not cafe:
+        return {"status": "error", "message": "Cafe not found."}, 404
+
+    name = (data.get("name") or "").strip()
+    name_error = input_validation.validate_text(name, "Game name", max_len=40)
+    if name_error:
+        return {"status": "error", "message": name_error}, 400
+
+    image_file = files.get("image") if files else None
+    if not image_file:
+        return {"status": "error", "message": "An image file is required."}, 400
+    validation_error = validate_image_upload(image_file)
+    if validation_error:
+        return {"status": "error", "message": validation_error}, 400
+
+    name_normalized = name.lower()
+    existing = cafe.get("custom_games") or []
+    if any((g.get("name_normalized") == name_normalized) for g in existing):
+        return {"status": "error", "message": f"'{name}' is already one of this cafe's custom games — pick it from the list instead of re-adding it."}, 400
+
+    try:
+        upload_result = cloudinary.uploader.upload(image_file)
+        image_url = upload_result.get("secure_url")
+    except Exception as upload_err:
+        print(f"[Cloudinary] Cafe custom game image upload failed: {upload_err}")
+        return {"status": "error", "message": "Image upload failed. Please try again."}, 502
+
+    new_game = {
+        "name": name,
+        "name_normalized": name_normalized,
+        "image_url": image_url,
+        "created_at": datetime.now(timezone.utc),
+    }
+    db.cafes.update_one({"_id": ObjectId(cafe_id)}, {"$push": {"custom_games": new_game}})
+
+    return {
+        "status": "success",
+        "customGame": {"id": name_normalized, "name": name, "imageUrl": image_url},
+        "customGames": [
+            {"id": g.get("name_normalized"), "name": g.get("name"), "imageUrl": g.get("image_url")}
+            for g in existing + [new_game]
+        ],
+    }, 201
 
 
 def get_cashfree_credentials_status_handler(cafe_id):

@@ -27,6 +27,37 @@ SEED_RIG_TEMPLATES = [
     {"type": "PS5", "name": "PS5 #02", "spec": "DualSense Edge · 4K"},
 ]
 
+def _parse_game_process_names(raw, installed_games):
+    """Validates an optional {game name -> this rig's own .exe name} override map, used
+    by the PC agent's auto-close feature. Lets one specific system override the global
+    game_images catalog's process_name when its own installation uses a different exe
+    (a different launcher/build than other cafes have for the same game) — see
+    _resolve_active_session_for_rig for the actual lookup-order this feeds.
+
+    Silently drops any key that isn't (still) one of this rig's own installed_games
+    (case-insensitive) rather than erroring — keeps it impossible to accumulate a stale
+    override for a game that's since been removed from this system, and tolerates the
+    frontend sending overrides for games it's about to deselect in the same save."""
+    if not raw:
+        return {}, None
+    if not isinstance(raw, dict):
+        return None, "Game process names must be a name -> process name mapping."
+
+    installed_lower = {g.strip().lower() for g in installed_games}
+    result = {}
+    for game_name, process_name in raw.items():
+        if not isinstance(game_name, str) or game_name.strip().lower() not in installed_lower:
+            continue
+        process_name = (process_name or "").strip()
+        if not process_name:
+            continue
+        error = input_validation.validate_text(process_name, f"Process name for '{game_name}'", max_len=100)
+        if error:
+            return None, error
+        result[game_name.strip()] = process_name
+    return result, None
+
+
 def map_rig_doc(doc, cafe_prices=None):
     """Maps a MongoDB rig document to the format expected by the frontend."""
     raw_name = doc.get("name", "")
@@ -64,6 +95,10 @@ def map_rig_doc(doc, cafe_prices=None):
         # booking flow (bookings_handler.create_booking_handler). No games catalog exists
         # anywhere in this codebase by design; this is deliberately just per-rig tags.
         "installed_games": doc.get("installed_games") or [],
+        # Per-system override of a game's auto-close process name (see
+        # _parse_game_process_names) — falls back to the global game_images catalog's
+        # process_name when a game here has no entry of its own.
+        "game_process_names": doc.get("game_process_names") or {},
         # Hardware-agent connectivity — never the raw agent_token itself (that's a
         # secret, only ever returned once by generate_agent_token_handler at pairing
         # time). hasAgent just means "has this rig ever been paired", independent of
@@ -300,6 +335,12 @@ def create_rig_handler(data):
         if games_error:
             return {"status": "error", "message": games_error}
 
+        game_process_names, process_names_error = _parse_game_process_names(
+            data.get("game_process_names") or data.get("gameProcessNames"), installed_games
+        )
+        if process_names_error:
+            return {"status": "error", "message": process_names_error}
+
         rig_doc = {
             "cafe_id": cafe_id,
             "type": rig_type,
@@ -311,6 +352,7 @@ def create_rig_handler(data):
             "zone": zone,
             "hourly_price": hourly_price,
             "installed_games": installed_games,
+            "game_process_names": game_process_names,
         }
 
         result = db_main.rigs.insert_one(rig_doc)
@@ -401,6 +443,20 @@ def update_rig_handler(rig_id, data):
             if games_error:
                 return {"status": "error", "message": games_error}
             update_fields["installed_games"] = installed_games
+
+        if "game_process_names" in data or "gameProcessNames" in data:
+            # Validate against whatever installed_games this save ends up with — the
+            # newly-submitted list above if this same save is also changing it, otherwise
+            # the rig's existing one (both arrive in the same payload from the Add/Edit
+            # System dialog, but handle them independently to keep each block simple).
+            current_games = update_fields.get("installed_games", existing_doc.get("installed_games") or [])
+            game_process_names, process_names_error = _parse_game_process_names(
+                data.get("game_process_names") if "game_process_names" in data else data.get("gameProcessNames"),
+                current_games,
+            )
+            if process_names_error:
+                return {"status": "error", "message": process_names_error}
+            update_fields["game_process_names"] = game_process_names
         # SECURITY: cafe_id is deliberately NOT updatable here. The caller is authorized
         # against the rig's CURRENT cafe_id only (RigDetailView._authenticate_for_rig
         # checks ownership of the rig as it exists now, before this update runs) — if this
@@ -593,13 +649,19 @@ def _authenticate_agent(db_main, rig_id, token):
     return rig, None
 
 
-def _resolve_active_session_for_rig(db_main, rig_id):
+def _resolve_active_session_for_rig(db_main, rig_id, rig=None):
     """The rig's current Active session, if any — {"ends_at": iso, "game": str, "process_name": str|None}
     or None. New-shape (group) bookings only: a rig's real per-rig status/end-time lives
     nested under rig_sessions[rig_id], not at the booking's top level (same place every
     other per-rig feature this session reads it from — list_sessions_handler,
     get_user_bookings_handler, the push-notification/auto-complete schedulers). Old-shape
-    (legacy slots) bookings are out of scope here, same as those other features."""
+    (legacy slots) bookings are out of scope here, same as those other features.
+
+    process_name resolution order: this rig's own game_process_names override (set in
+    cafe-command-center's Add/Edit System dialog, for when this specific system's
+    install uses a different .exe than other cafes' copy of the same game) first, then
+    the global game_images catalog's default, so a cafe only needs to override it when
+    their install actually differs."""
     booking = db_main.bookings.find_one({"rig_ids": rig_id, f"rig_sessions.{rig_id}.status": "Active"})
     if not booking:
         return None
@@ -610,8 +672,16 @@ def _resolve_active_session_for_rig(db_main, rig_id):
     game = (booking.get("game") or "").strip()
     process_name = None
     if game:
-        game_doc = db_main.game_images.find_one({"name_normalized": game.lower()}, {"process_name": 1})
-        process_name = (game_doc or {}).get("process_name") or None
+        if rig is None:
+            rig = db_main.rigs.find_one({"_id": ObjectId(rig_id)}, {"game_process_names": 1})
+        rig_overrides = (rig or {}).get("game_process_names") or {}
+        game_lower = game.lower()
+        process_name = next(
+            (v for k, v in rig_overrides.items() if k.strip().lower() == game_lower and v), None
+        )
+        if not process_name:
+            game_doc = db_main.game_images.find_one({"name_normalized": game_lower}, {"process_name": 1})
+            process_name = (game_doc or {}).get("process_name") or None
     return {"ends_at": ends_at, "game": game, "process_name": process_name}
 
 
@@ -631,7 +701,7 @@ def agent_poll_handler(rig_id, token):
 
         db_main.rigs.update_one({"_id": ObjectId(rig_id)}, {"$set": {"agent_last_seen": datetime.now(IST).isoformat()}})
 
-        active_session = _resolve_active_session_for_rig(db_main, rig_id)
+        active_session = _resolve_active_session_for_rig(db_main, rig_id, rig=rig)
         command_doc = db_main.rig_commands.find_one(
             {"rig_id": rig_id, "status": "pending"}, sort=[("created_at", 1)]
         )

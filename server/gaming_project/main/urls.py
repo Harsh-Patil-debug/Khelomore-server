@@ -21,6 +21,7 @@ urlpatterns = [
     path('cafes/parse-maps-url/', CafeParseMapsUrlView.as_view(), name='parse_maps_url'),
     path('cafes/<str:cafe_id>/', CafeDetailView.as_view(), name='cafe_detail'),
     path('cafes/<str:cafe_id>/restore/', CafeRestoreView.as_view(), name='cafe_restore'),
+    path('cafes/<str:cafe_id>/custom-games/', CafeCustomGameCreateView.as_view(), name='cafe_custom_game_create'),
     path('cafes/<str:cafe_id>/payment-credentials/', CafeCashfreeCredentialsView.as_view(), name='cafe_cashfree_credentials'),
     path('cafes/<str:cafe_id>/payment-credentials/password-status/', CafePaymentPasswordStatusView.as_view(), name='cafe_payment_password_status'),
     path('cafes/<str:cafe_id>/payment-credentials/set-password/', CafePaymentPasswordSetView.as_view(), name='cafe_payment_password_set'),

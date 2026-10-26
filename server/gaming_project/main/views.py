@@ -1206,6 +1206,21 @@ class CafeDetailView(APIView):
         return Response(response, status=status.HTTP_200_OK)
 
 
+class CafeCustomGameCreateView(APIView):
+    """POST /cafes/<cafe_id>/custom-games/ — adds a game (with a real uploaded image) to
+    this cafe's own list, distinct from the global, super-admin-managed game_images
+    catalog. Used from cafe-command-center's Add/Edit System dialog so a cafe-specific
+    game can show real artwork instead of a generic icon, scoped to this cafe only."""
+    parser_classes = (MultiPartParser, FormParser)
+
+    def post(self, request, cafe_id):
+        email, error_response = authenticate_admin_owner(request, cafe_id)
+        if error_response:
+            return error_response
+        response, status_code = cafes.add_cafe_custom_game_handler(cafe_id, request.data, request.FILES)
+        return Response(response, status=status_code)
+
+
 class CafeRestoreView(APIView):
     """POST /cafes/<cafe_id>/restore/ — Restore a soft-deleted cafe (Super Admin only)"""
     def post(self, request, cafe_id):
