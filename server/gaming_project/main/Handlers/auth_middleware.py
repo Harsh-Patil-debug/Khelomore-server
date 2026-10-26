@@ -32,7 +32,23 @@ def authenticate_request(request):
         return None, Response({"error": "Authorization token missing or invalid"}, status=status.HTTP_401_UNAUTHORIZED)
     
     try:
-        email = auth_handler.verify_token(token)
+        # decode_token_payload (not verify_token) so a super_admin token's session_id
+        # claim is visible here too — /auth/me/ (BookMyConsoleMeView) goes through this
+        # generic function, not authenticate_super_admin_request, so single-session
+        # enforcement (see issue_token_pair) has to live here as well, or a superseded
+        # super admin session would keep passing /auth/me/ ("still logged in") while
+        # every other endpoint correctly 401s it - the exact inconsistent state that
+        # looked like a login/logout toggle bug.
+        payload = auth_handler.decode_token_payload(token)
+        email = payload.get("email")
+        session_id = payload.get("session_id")
+        if session_id:
+            from .db_connection import db_main
+            super_admin = db_main.super_admin.find_one({"email": email}, {"current_session_id": 1})
+            current_session_id = super_admin.get("current_session_id") if super_admin else None
+            if current_session_id and session_id != current_session_id:
+                print(f"[DEBUG auth_middleware] Super Admin {email} token superseded by a newer login elsewhere.")
+                return None, Response({"error": "Logged in on another device. Please sign in again."}, status=status.HTTP_401_UNAUTHORIZED)
         print(f"[DEBUG auth_middleware] Token verified successfully for email: {email}")
         return email, None
     except Exception as e:
@@ -92,17 +108,31 @@ def authenticate_super_admin_request(request):
 
     # 2. Try dynamic JWT token
     try:
-        email = auth_handler.verify_token(token)
+        # decode_token_payload (not verify_token) because single-session enforcement
+        # below needs the token's session_id claim, not just the email.
+        payload = auth_handler.decode_token_payload(token)
+        email = payload.get("email")
         from .db_connection import db_main
         # Look up in the super_admin collection
         super_admin = db_main.super_admin.find_one({"email": email})
         if not super_admin:
             print(f"[DEBUG auth_middleware] User {email} not found in super_admin collection.")
             return None, Response({"error": "Access denied. Not a super admin."}, status=status.HTTP_403_FORBIDDEN)
-        
+
         if super_admin.get("status") != "Active":
             print(f"[DEBUG auth_middleware] Super Admin {email} is not Active.")
             return None, Response({"error": "Super admin account is not active."}, status=status.HTTP_403_FORBIDDEN)
+
+        # SECURITY/PRODUCT DECISION: super_admin is single-session by design (see
+        # issue_token_pair) — logging in on a second device immediately ends the first.
+        # current_session_id being absent means this account predates the feature (or
+        # has never logged in since it shipped); don't break an otherwise-valid token
+        # over a field that was never stamped, only enforce once a real value exists to
+        # compare against.
+        current_session_id = super_admin.get("current_session_id")
+        if current_session_id and payload.get("session_id") != current_session_id:
+            print(f"[DEBUG auth_middleware] Super Admin {email} token superseded by a newer login elsewhere.")
+            return None, Response({"error": "Logged in on another device. Please sign in again."}, status=status.HTTP_401_UNAUTHORIZED)
 
         print(f"[DEBUG auth_middleware] Dynamic Super Admin token verified for: {email}")
         return email, None

@@ -311,7 +311,7 @@ def _refresh_token_exp_seconds(bucket: str) -> int:
     return JWT_ADMIN_EXP_DELTA_SECONDS if bucket in ("admin", "super_admin") else JWT_EXP_DELTA_SECONDS
 
 
-def generate_token(email: str, is_admin: bool = False, role: str = "") -> str:
+def generate_token(email: str, is_admin: bool = False, role: str = "", extra_claims: Optional[dict] = None) -> str:
     bucket = _classify_account_bucket(is_admin, role)
     # See the ACCESS_TOKEN_EXP_SECONDS comment above: every bucket except gamer now gets a
     # short-lived access token backed by the new refresh-token layer below; gamer keeps its
@@ -323,8 +323,24 @@ def generate_token(email: str, is_admin: bool = False, role: str = "") -> str:
         'jti': uuid.uuid4().hex,
         'exp': datetime.now(IST) + timedelta(seconds=exp_seconds)
     }
+    if extra_claims:
+        payload.update(extra_claims)
     token = jwt.encode(payload, JWT_SECRET, JWT_ALGORITHM)
     return token
+
+
+def decode_token_payload(token: str) -> dict:
+    """Same verification as verify_token (signature, expiry, jti-revocation) but returns
+    the full claim set instead of just the email — needed by callers that read a custom
+    claim (e.g. super_admin's session_id, see issue_token_pair/authenticate_super_admin_request)
+    beyond what verify_token exposes."""
+    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    jti = payload.get('jti')
+    if not jti:
+        raise jwt.InvalidTokenError("Token missing jti claim.")
+    if db_main.revoked_tokens.find_one({"jti": jti}):
+        raise jwt.InvalidTokenError("Token has been revoked.")
+    return payload
 
 def revoke_token(token: str) -> None:
     """
@@ -414,8 +430,34 @@ def _issue_refresh_token(email: str, is_admin: bool, role: str, family_id: Optio
 
 def issue_token_pair(email: str, is_admin: bool = False, role: str = ""):
     """Issues a fresh (access_token, refresh_token) pair for a brand-new session — called
-    at OTP verification and Google sign-in."""
-    return generate_token(email, is_admin=is_admin, role=role), _issue_refresh_token(email, is_admin, role)
+    at OTP verification and Google sign-in.
+
+    SECURITY/PRODUCT DECISION: a super_admin account is deliberately single-session —
+    logging in on a second device must immediately end the first device's session, not
+    let both run concurrently. Rotating a `current_session_id` stamp on the super_admin
+    doc and embedding it in the new access token (checked in
+    authenticate_super_admin_request) gives TRUE immediate invalidation: the old
+    device's very next request gets a real, confirmed 401 instead of quietly working for
+    up to ACCESS_TOKEN_EXP_SECONDS more and then failing in a way that looked like
+    unexplained flakiness (a transient-vs-confirmed distinction the frontend was
+    recently fixed to handle correctly — a confirmed 401 now cleanly logs out in one
+    shot, no toggle). Revoking the previous refresh-token family too closes the other
+    half: the old device can't silently recover a working session via refresh either.
+    Every other bucket (admin/website_user/gamer) is unaffected — concurrent logins
+    across multiple customer devices stay completely normal.
+    """
+    extra_claims = None
+    if role == "super_admin":
+        session_id = uuid.uuid4().hex
+        db_main.super_admin.update_one({"email": email}, {"$set": {"current_session_id": session_id}})
+        extra_claims = {"session_id": session_id}
+        # Revoke every existing refresh-token family for this account so the previous
+        # device can't silently refresh its way back in once its access token expires.
+        db_main.refresh_tokens.update_many(
+            {"email": email, "bucket": "super_admin", "used": False},
+            {"$set": {"used": True, "revoked_reason": "superseded_by_new_login"}},
+        )
+    return generate_token(email, is_admin=is_admin, role=role, extra_claims=extra_claims), _issue_refresh_token(email, is_admin, role)
 
 
 def refresh_access_token(raw_refresh_token: str, expected_bucket: Optional[str] = None):
@@ -473,8 +515,20 @@ def refresh_access_token(raw_refresh_token: str, expected_bucket: Optional[str] 
         # correctly read as "already used" rather than "still expired-but-unclaimed").
         return None
 
+    # A super_admin's refreshed access token must keep carrying the account's CURRENT
+    # session_id (see issue_token_pair) — this doesn't exist on the refresh-token doc
+    # itself, only on the super_admin record, since a refresh is the SAME device
+    # continuing its own already-valid session, not a new login. Looked up fresh here
+    # (rather than carried from the old access token, which this function never sees)
+    # so it naturally stays correct even if something else legitimately re-stamps it.
+    extra_claims = None
+    if doc.get("role") == "super_admin":
+        super_admin = db_main.super_admin.find_one({"email": doc["email"]}, {"current_session_id": 1})
+        if super_admin and super_admin.get("current_session_id"):
+            extra_claims = {"session_id": super_admin["current_session_id"]}
+
     new_refresh = _issue_refresh_token(doc["email"], doc.get("is_admin", False), doc.get("role", ""), family_id=doc["family_id"])
-    new_access = generate_token(doc["email"], is_admin=doc.get("is_admin", False), role=doc.get("role", ""))
+    new_access = generate_token(doc["email"], is_admin=doc.get("is_admin", False), role=doc.get("role", ""), extra_claims=extra_claims)
     return new_access, new_refresh, bucket
 
 
