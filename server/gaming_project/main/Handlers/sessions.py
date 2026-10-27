@@ -43,16 +43,20 @@ def _recompute_group_status(rig_sessions: dict) -> str:
     while others keep playing). This recomputes ONE aggregate status for consumers that
     still display a single status per booking (get_user_bookings_handler, the customer's
     own booking history) — Active if any rig is Active; Cancelled only once every rig is
-    Cancelled (a full no-show); Completed once every rig is Completed-or-Cancelled with
-    at least one actually Completed (some real play happened); otherwise Upcoming. Live
-    Floor itself (list_sessions_handler below) shows the real per-rig state directly and
-    doesn't need this aggregate."""
+    Cancelled (a full no-show); Completed once every rig is Completed/Expired-or-Cancelled
+    with at least one actually Completed or Expired (some real play happened — Expired
+    counts the same as Completed here: the distinction between "admin hasn't dismissed it
+    yet" and "admin dismissed it" only matters to Live Floor's own tile, never to the
+    customer's booking history or any inclusion/conflict-checking query downstream, which
+    only ever look at this aggregate); otherwise Upcoming. Live Floor itself
+    (list_sessions_handler below) shows the real per-rig state directly and doesn't need
+    this aggregate."""
     statuses = [rs.get("status", "Upcoming") for rs in (rig_sessions or {}).values()]
     if any(s == "Active" for s in statuses):
         return "Active"
     if statuses and all(s == "Cancelled" for s in statuses):
         return "Cancelled"
-    if statuses and all(s in ("Completed", "Cancelled") for s in statuses) and any(s == "Completed" for s in statuses):
+    if statuses and all(s in ("Completed", "Expired", "Cancelled") for s in statuses) and any(s in ("Completed", "Expired") for s in statuses):
         return "Completed"
     return "Upcoming"
 
@@ -87,9 +91,23 @@ def list_sessions_handler(cafe_id: str):
         )
 
         # Re-fetch current bookings & rigs (including future bookings)
+        #
+        # Also pulls in today's Completed-aggregate group bookings (date-scoped, not
+        # unbounded — otherwise every completed booking this cafe has EVER had would
+        # match). A group booking's aggregate status folds Expired into "Completed" the
+        # moment every rig in it reaches a terminal state (_recompute_group_status) —
+        # that's correct for the customer-facing booking history, but it also means a
+        # booking with an Expired-but-not-yet-dismissed rig would otherwise be filtered
+        # out HERE before the per-rig loop below ever gets a chance to keep its tile
+        # visible. Today's date scope is enough: an Expired tile that's still
+        # undismissed days later would be a genuinely stale admin workflow issue, not
+        # something this query needs to account for.
         bookings = list(db_main.bookings.find({
             "cafe_id": cafe_id,
-            "status": {"$in": ["Active", "Upcoming"]}
+            "$or": [
+                {"status": {"$in": ["Active", "Upcoming"]}},
+                {"status": "Completed", "date": today_str, "rig_ids": {"$exists": True, "$ne": []}},
+            ],
         }).sort([("date", 1), ("slots", 1)]))
         
         rigs = list(db_main.rigs.find({"cafe_id": cafe_id}))
@@ -128,6 +146,13 @@ def list_sessions_handler(cafe_id: str):
                     rs_status = rs.get("status", "Upcoming")
                     if rs_status in ("Completed", "Cancelled"):
                         continue  # this rig is free again — no tile needed
+                    # Expired is deliberately NOT in the skip-list above: the session's
+                    # timer has naturally run out (set by auto_complete_expired_sessions),
+                    # the slot is already free for new bookings (see
+                    # check_multi_rig_window_conflict/get_rig_availability_handler), but the
+                    # tile must stay visible on Live Floor until an admin explicitly
+                    # dismisses it (End Session) — only THAT action produces "Completed"
+                    # and makes the tile disappear.
                     rig_name = matched_rig.get("name", "")
                     rigs_with_bookings.add(rig_name)
 
@@ -135,13 +160,23 @@ def list_sessions_handler(cafe_id: str):
                         if matched_rig.get("status") != "maintenance":
                             db_main.rigs.update_one({"_id": matched_rig["_id"]}, {"$set": {"status": "occupied"}})
                             matched_rig["status"] = "occupied"
+                    elif rs_status == "Expired":
+                        # The session is genuinely over — the physical PC is free to walk
+                        # up to right now, same as the slot already being free for new
+                        # bookings. Shown as "reserved" would be misleading (nobody's
+                        # waiting on it); "occupied" would be wrong too (nothing's running
+                        # anymore, as far as the booking system knows). Only "maintenance"
+                        # overrides this, same as every other branch here.
+                        if matched_rig.get("status") not in ["maintenance"]:
+                            db_main.rigs.update_one({"_id": matched_rig["_id"]}, {"$set": {"status": "available"}})
+                            matched_rig["status"] = "available"
                     elif is_today:
                         if matched_rig.get("status") not in ["occupied", "maintenance"]:
                             db_main.rigs.update_one({"_id": matched_rig["_id"]}, {"$set": {"status": "reserved"}})
                             matched_rig["status"] = "reserved"
 
                     actual_end_raw = rs.get("actual_end_at")
-                    if actual_end_raw and rs_status == "Active":
+                    if actual_end_raw and rs_status in ("Active", "Expired"):
                         try:
                             actual_end_dt = datetime.fromisoformat(actual_end_raw)
                             if actual_end_dt.tzinfo is None:
@@ -172,7 +207,7 @@ def list_sessions_handler(cafe_id: str):
                         # one time-section together.
                         "scheduled_start_minutes": start_minutes,
                         "scheduled_start_label": _minutes_to_display(start_minutes),
-                        "status": "active" if rs_status == "Active" else "reserved",
+                        "status": "active" if rs_status == "Active" else ("expired" if rs_status == "Expired" else "reserved"),
                     })
                 continue
 
@@ -513,7 +548,7 @@ def cancel_session_handler(booking_id: str, rig_id: "str | None" = None):
                 return {"status": "error", "message": "A valid rig_id (from this booking's rig_ids) is required."}
             rig_sessions = booking.get("rig_sessions") or {}
             current_status = rig_sessions.get(rig_id, {}).get("status", "Upcoming")
-            if current_status == "Active":
+            if current_status in ("Active", "Expired"):
                 return {"status": "error", "message": "Can't cancel a session that's already started — use End Session instead."}
             rig_sessions[rig_id] = {**rig_sessions.get(rig_id, {}), "status": "Cancelled", "cancelled_at": now.isoformat()}
             new_group_status = _recompute_group_status(rig_sessions)
@@ -570,14 +605,60 @@ def cancel_session_handler(booking_id: str, rig_id: "str | None" = None):
         return {"status": "error", "message": f"Failed to cancel reservation: {e}"}
 
 
+def _expire_rig_session(booking_id: str, rig_id: str) -> dict:
+    """New-shape-only counterpart to end_session_handler, called ONLY by
+    auto_complete_expired_sessions when a rig's own timer has genuinely run out. Sets
+    "Expired", not "Completed" — the distinction Live Floor actually cares about: an
+    Expired tile stays visible (list_sessions_handler deliberately does NOT skip it) so
+    the admin notices the PC's session ended and can go check on it, whereas Completed
+    disappears into history immediately. Everything that makes the slot available again
+    (frees the physical rig, deletes the permanent slot_locks records, folds into
+    "Completed" at the group-aggregate level via _recompute_group_status, excluded from
+    conflict-checking in bookings_handler.py) already happens at THIS point, not only
+    once the admin later clicks End Session to actually dismiss the tile — "the slot is
+    free" and "the tile is still showing" are deliberately independent facts now.
+    """
+    db_main = get_db()
+    if db_main is None:
+        return {"status": "error", "message": "MongoDB connection is not established."}
+    now = datetime.now(IST)
+    booking = db_main.bookings.find_one({"_id": ObjectId(booking_id)})
+    if not booking:
+        return {"status": "error", "message": "Booking not found."}
+
+    rig_sessions = booking.get("rig_sessions") or {}
+    prior = rig_sessions.get(rig_id, {})
+    rig_sessions[rig_id] = {**prior, "status": "Expired", "expired_at": now.isoformat()}
+    new_group_status = _recompute_group_status(rig_sessions)
+    db_main.bookings.update_one(
+        {"_id": ObjectId(booking_id)},
+        {"$set": {f"rig_sessions.{rig_id}": rig_sessions[rig_id], "status": new_group_status}},
+    )
+    db_main.rigs.update_one({"_id": ObjectId(rig_id)}, {"$set": {"status": "available"}})
+
+    # Same permanent slot_locks cleanup end_session_handler does — the slot is genuinely
+    # free the moment the timer runs out, not only once the admin later dismisses the tile.
+    from .bookings_handler import _micro_slot_keys, _time_str_to_minutes
+    start_minutes = _time_str_to_minutes(booking.get("start_time"))
+    duration_minutes = booking.get("duration_minutes")
+    if start_minutes is not None and duration_minutes is not None:
+        micro_keys = _micro_slot_keys(start_minutes, duration_minutes)
+        db_main.slot_locks.delete_many({
+            "cafe_id": booking["cafe_id"], "rig": rig_id, "date": booking.get("date"),
+            "slot": {"$in": micro_keys},
+        })
+
+    return {"status": "success", "message": "Session expired — awaiting admin dismissal."}
+
+
 def auto_complete_expired_sessions() -> int:
-    """Scheduler-driven counterpart to end_session_handler: automatically ends (marks
-    Completed, frees the rig, releases its slot_locks) any Active session whose
-    actual_end_at has genuinely passed, instead of waiting indefinitely for an admin to
-    tap "End Session" on Live Floor. Deliberately calls end_session_handler itself for
-    the actual completion rather than duplicating its logic, so a session ended manually
-    and one ended automatically by timeout can never drift apart or handle group-booking
-    per-rig state differently.
+    """Scheduler-driven: automatically ends an old-shape session (marks Completed, frees
+    the rig, releases its slot_locks — identical to end_session_handler, since old-shape
+    bookings have no "Expired, awaiting dismissal" tile concept on Live Floor) or expires
+    a new-shape rig session (marks Expired via _expire_rig_session above — frees the slot
+    immediately but keeps the Live Floor tile visible until the admin dismisses it)
+    whenever its actual_end_at has genuinely passed, instead of waiting indefinitely for
+    an admin to tap "End Session".
 
     Checked every scheduler tick (see scheduler.py) alongside the "session ended" push
     notification — a session can be auto-completed and notified in the same tick, or
@@ -623,7 +704,7 @@ def auto_complete_expired_sessions() -> int:
                 for rig_id, rs in rig_sessions.items():
                     if rs.get("status") != "Active" or not _is_due(rs.get("actual_end_at")):
                         continue
-                    result = end_session_handler(booking_id, rig_id)
+                    result = _expire_rig_session(booking_id, rig_id)
                     if result.get("status") == "success":
                         completed += 1
             else:

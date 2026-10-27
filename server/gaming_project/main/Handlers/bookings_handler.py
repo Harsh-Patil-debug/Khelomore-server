@@ -266,7 +266,10 @@ def check_multi_rig_window_conflict(cafe_id: str, date: str, rig_ids: list, star
             rig_sessions = b.get("rig_sessions") or {}
             overlap_ids = {
                 rid for rid in overlap_ids
-                if rig_sessions.get(rid, {}).get("status", "Upcoming") not in ("Completed", "Cancelled")
+                # Expired treated exactly like Completed: the slot is free the instant a
+                # session's timer naturally runs out, even though its Live Floor tile stays
+                # visible until the admin dismisses it (see _expire_rig_session).
+                if rig_sessions.get(rid, {}).get("status", "Upcoming") not in ("Completed", "Expired", "Cancelled")
             }
             if not overlap_ids:
                 continue
@@ -274,9 +277,33 @@ def check_multi_rig_window_conflict(cafe_id: str, date: str, rig_ids: list, star
             b_duration = b.get("duration_minutes")
             if b_start is None or b_duration is None:
                 continue
-            b_end = b_start + b_duration
-            if candidate_start < b_end and b_start < candidate_end:
-                names = ", ".join(rig_names_by_id.get(rid, rid) for rid in overlap_ids)
+            b_end_static = b_start + b_duration
+            # Checked PER RIG, not with one shared end for the whole group — different
+            # rigs in the same booking can each be extended by different amounts
+            # (extend_session_handler only ever touches ONE rig's actual_end_at), so a
+            # single static b_end would either miss a real conflict (extended rig) or
+            # falsely flag one (un-extended sibling) depending on which rig's reality it
+            # happened to match.
+            conflicting_ids = set()
+            for rid in overlap_ids:
+                b_end = b_end_static
+                if rig_sessions.get(rid, {}).get("status") == "Active":
+                    actual_end_raw = rig_sessions.get(rid, {}).get("actual_end_at")
+                    if actual_end_raw:
+                        try:
+                            actual_end_dt = datetime.fromisoformat(actual_end_raw)
+                            if actual_end_dt.tzinfo is None:
+                                actual_end_dt = actual_end_dt.replace(tzinfo=IST)
+                            extended_end = actual_end_dt.hour * 60 + actual_end_dt.minute
+                            if extended_end < b_start:
+                                extended_end += 24 * 60  # crossed midnight
+                            b_end = max(b_end, extended_end)
+                        except Exception:
+                            pass
+                if candidate_start < b_end and b_start < candidate_end:
+                    conflicting_ids.add(rid)
+            if conflicting_ids:
+                names = ", ".join(rig_names_by_id.get(rid, rid) for rid in conflicting_ids)
                 return f"Conflict detected: {names} already booked for an overlapping time."
         else:
             b_rig_name = _normalize_rig_name(b.get("rig", ""))
@@ -330,9 +357,32 @@ def get_rig_availability_handler(cafe_id: str, date: str):
                     # specific rig is free again and must not block a new booking from
                     # seeing it as available.
                     rig_status = rig_sessions.get(rid, {}).get("status", "Upcoming")
-                    if rig_status in ("Completed", "Cancelled"):
+                    # Expired treated exactly like Completed — see the matching comment
+                    # in check_multi_rig_window_conflict above.
+                    if rig_status in ("Completed", "Expired", "Cancelled"):
                         continue
-                    busy[rid].append({"start": start, "end": start + duration})
+                    end = start + duration
+                    # An extended Active session's REAL end time lives in this rig's own
+                    # actual_end_at (extend_session_handler only ever updates that — it
+                    # never touches the booking's static top-level duration_minutes), so a
+                    # busy window computed from start+duration alone goes stale the moment
+                    # a session is extended: a new booking would see this rig as free
+                    # starting from its ORIGINAL scheduled end, even while it's genuinely
+                    # still running past that point. Use whichever end is later.
+                    if rig_status == "Active":
+                        actual_end_raw = rig_sessions.get(rid, {}).get("actual_end_at")
+                        if actual_end_raw:
+                            try:
+                                actual_end_dt = datetime.fromisoformat(actual_end_raw)
+                                if actual_end_dt.tzinfo is None:
+                                    actual_end_dt = actual_end_dt.replace(tzinfo=IST)
+                                extended_end = actual_end_dt.hour * 60 + actual_end_dt.minute
+                                if extended_end < start:
+                                    extended_end += 24 * 60  # crossed midnight
+                                end = max(end, extended_end)
+                            except Exception:
+                                pass
+                    busy[rid].append({"start": start, "end": end})
             else:
                 try:
                     start_dt, end_dt = parse_slot_times(b.get("date"), b.get("slots", []))
