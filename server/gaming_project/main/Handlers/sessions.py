@@ -752,6 +752,34 @@ def extend_session_handler(booking_id: str, minutes: int, rig_id: "str | None" =
                     new_actual_end = datetime.now(IST) + timedelta(minutes=minutes)
             else:
                 new_actual_end = datetime.now(IST) + timedelta(minutes=minutes)
+
+            # SECURITY/CORRECTNESS: extending used to just overwrite actual_end_at with
+            # zero regard for whether another customer already has this exact rig booked
+            # starting somewhere inside the newly-extended window — a real double-booking
+            # (two customers assigned the same physical PC at overlapping times), not just
+            # a display glitch. Reuses the same interval-overlap check a brand-new booking
+            # goes through, over the FULL proposed window (original start -> new end),
+            # excluding this booking's own doc (which would otherwise trivially "conflict"
+            # with itself on every single extend call).
+            from .bookings_handler import check_multi_rig_window_conflict, _time_str_to_minutes
+            start_minutes = _time_str_to_minutes(booking.get("start_time"))
+            if start_minutes is not None:
+                new_end_minutes = new_actual_end.hour * 60 + new_actual_end.minute
+                if new_end_minutes < start_minutes:
+                    new_end_minutes += 24 * 60  # crossed midnight
+                proposed_duration = new_end_minutes - start_minutes
+                rig_doc = db_main.rigs.find_one({"_id": ObjectId(rig_id)}, {"name": 1})
+                rig_name = rig_doc.get("name", "This system") if rig_doc else "This system"
+                conflict = check_multi_rig_window_conflict(
+                    booking["cafe_id"], booking.get("date"), [rig_id], start_minutes, proposed_duration,
+                    {rig_id: rig_name}, exclude_booking_id=booking_id,
+                )
+                if conflict:
+                    return {
+                        "status": "error",
+                        "message": f"Can't extend — {rig_name} is already booked right after this session ends. All upcoming slots for this system are taken.",
+                    }
+
             rig_sessions[rig_id] = {**rs, "actual_end_at": new_actual_end.isoformat()}
             db_main.bookings.update_one(
                 {"_id": ObjectId(booking_id)},

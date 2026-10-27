@@ -239,7 +239,7 @@ def parse_window(date_str: str, start_minutes: int, duration_minutes: int) -> tu
     return start_dt, end_dt
 
 
-def check_multi_rig_window_conflict(cafe_id: str, date: str, rig_ids: list, start_minutes: int, duration_minutes: int, rig_names_by_id: dict) -> "str | None":
+def check_multi_rig_window_conflict(cafe_id: str, date: str, rig_ids: list, start_minutes: int, duration_minutes: int, rig_names_by_id: dict, exclude_booking_id: "str | None" = None) -> "str | None":
     """
     Real interval-overlap conflict check (unlike check_slot_conflict's exact-string
     membership above) — the actual bug class this new model exists to fix: two bookings
@@ -247,11 +247,18 @@ def check_multi_rig_window_conflict(cafe_id: str, date: str, rig_ids: list, star
     candidate rigs against BOTH booking shapes that might already occupy them: new-shape
     (rig_ids + start_time/duration_minutes) and old-shape (rig name + slots), since a rig
     can have bookings of either kind depending on when it was booked.
+
+    exclude_booking_id: skips that one booking's own doc in the scan — needed by
+    extend_session_handler, which checks whether EXTENDING a session's own window would
+    now overlap some OTHER booking; without excluding itself, a booking being extended
+    would trivially "conflict" with its own existing reservation on every call.
     """
     candidate_start = start_minutes
     candidate_end = start_minutes + duration_minutes
     existing = db_main.bookings.find({"cafe_id": cafe_id, "date": date, "status": {"$in": ["Upcoming", "Active"]}})
     for b in existing:
+        if exclude_booking_id and str(b.get("_id")) == exclude_booking_id:
+            continue
         b_rig_ids = b.get("rig_ids")
         if b_rig_ids:
             overlap_ids = set(b_rig_ids) & set(rig_ids)
